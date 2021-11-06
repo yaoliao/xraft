@@ -1,7 +1,7 @@
 package com.yl.raft.core.node;
 
-import com.google.common.collect.Lists;
 import com.google.common.eventbus.Subscribe;
+import com.yl.raft.core.log.entry.EntryMeta;
 import com.yl.raft.core.node.role.*;
 import com.yl.raft.core.node.store.NodeStore;
 import com.yl.raft.core.rpc.message.*;
@@ -87,9 +87,10 @@ public class NodeImpl implements Node {
         RequestVoteRpc requestVoteRpc = new RequestVoteRpc();
         requestVoteRpc.setTerm(newTerm);
         requestVoteRpc.setCandidateId(context.getSelfId());
-        // TODO 日志相关处理
-        requestVoteRpc.setLastLogIndex(0);
-        requestVoteRpc.setLastLogTerm(0);
+        // 日志相关处理
+        EntryMeta lastEntryMeta = context.getLog().getLastEntryMeta();
+        requestVoteRpc.setLastLogIndex(lastEntryMeta.getIndex());
+        requestVoteRpc.setLastLogTerm(lastEntryMeta.getTerm());
         // 发起投票
         context.getConnector().sendRequestVote(requestVoteRpc, context.getGroup().listEndpointOfMajorExceptSelf());
     }
@@ -160,7 +161,25 @@ public class NodeImpl implements Node {
             return;
         }
 
-        // TODO 日志相关处理
+        // 日志相关处理
+        NodeId sourceNodeId = message.getSourceNodeId();
+        GroupMember member = context.getGroup().getMember(sourceNodeId);
+        if (member == null) {
+            log.info("unexpected append entries result from node {}, node maybe removed", sourceNodeId);
+            return;
+        }
+        if (rpc.isSuccess()) {
+            // follower 追加日志成功，推进 leader 保存的 matchIndex 和 nextIndex
+            if (member.advanceReplicatingState(message.getAppendEntriesRpc().getLastEntryIndex())) {
+                // 推进 leader 的 commitIndex
+                context.getLog().advanceCommitIndex(context.getGroup().getMatchIndex(), role.getTerm());
+            }
+        } else {
+            // follower 追加日志失败，将 nextIndex - 1 然后，重新发送 AppendEntriesRPC
+            if (!member.backOfNextIndex()) {
+                log.warn("cannot back off next index more, node {}", sourceNodeId);
+            }
+        }
     }
 
 
@@ -203,8 +222,14 @@ public class NodeImpl implements Node {
     }
 
     private boolean appendEntries(AppendEntriesRpc rpc) {
-        // TODO 追加日志
-        return true;
+        // 追加 leader 日志
+        boolean result = context.getLog().appendEntriesFromLeader(rpc.getPrevLogIndex(), rpc.getPrevLogTerm(), rpc.getEntries());
+        if (result) {
+            // 如果 leaderCommit > commitIndex， 设置本地 commitIndex 为 leaderCommit 和最新日志索引中 较小的一个。
+            // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+            context.getLog().advanceCommitIndex(Math.min(rpc.getLeaderCommit(), rpc.getLastEntryIndex()), rpc.getTerm());
+        }
+        return result;
     }
 
     /**
@@ -223,8 +248,9 @@ public class NodeImpl implements Node {
             return new RequestVoteResult(role.getTerm(), false);
         }
 
-        // TODO 比较日志
-        boolean logAfter = true;
+        // 比较日志
+        boolean logAfter = !context.getLog().isNewerThan(requestVoteRpc.getLastLogIndex(),
+                requestVoteRpc.getLastLogTerm());
 
         // 任期数大于自己的任期，转变为 Follower。
         // 并且需要比较候选人的日志是否比自己的日志新，只有候选人的日志比自己的新的时候才投票
@@ -308,16 +334,25 @@ public class NodeImpl implements Node {
         // 票数过半,成为 Leader
         if (currentVotesCount > count / 2) {
             log.info("become leader, term {}", role.getTerm());
-            // resetReplicatingStates();  TODO
+            resetReplicatingStates();
 
             // 转变为 leader，启动日志复制定时任务
             changeToRole(new LeaderNodeRole(role.getTerm(), scheduleLogReplicationTask()));
-            // context.log().appendEntry(role.getTerm()); // TODO no-op log
+            // no-op log
+            context.getLog().appendEntry(role.getTerm());
             return;
         }
 
         // 票数未过半，记录任期数和新的票数。并重新开启选举超时任务
         changeToRole(new CandidateNodeRole(role.getTerm(), currentVotesCount, scheduleElectionTimeout()));
+    }
+
+    /**
+     * 初始化 leader 的 nextIndex 和 matchIndex
+     * nextIndex 初始值为 leader 最新一条日 志的索引 +1； matchIndex 初始值为 0
+     */
+    private void resetReplicatingStates() {
+        context.getGroup().resetReplicatingStates(context.getLog().getNextIndex());
     }
 
     /**
@@ -337,20 +372,13 @@ public class NodeImpl implements Node {
         log.debug("replicate log");
 
         for (GroupMember member : context.getGroup().listReplicationTarget()) {
-            doReplicateLog(member);
+            doReplicateLog(member, context.getConfig().getMaxReplicationEntries());
         }
     }
 
-    private void doReplicateLog(GroupMember member) {
-        AppendEntriesRpc appendEntriesRpc = new AppendEntriesRpc();
-        appendEntriesRpc.setTerm(role.getTerm());
-        appendEntriesRpc.setLeaderId(context.getSelfId());
-
-        // TODO 日志信息
-        appendEntriesRpc.setPrevLogIndex(0);
-        appendEntriesRpc.setPrevLogTerm(0);
-        appendEntriesRpc.setEntries(Lists.newArrayList());
-        appendEntriesRpc.setLeaderCommit(0);
+    private void doReplicateLog(GroupMember member, int maxEntries) {
+        AppendEntriesRpc appendEntriesRpc = context.getLog()
+                .createAppendEntriesRpc(role.getTerm(), context.getSelfId(), member.getNextIndex(), maxEntries);
 
         context.getConnector().sendAppendEntries(appendEntriesRpc, member.getEndpoint());
     }

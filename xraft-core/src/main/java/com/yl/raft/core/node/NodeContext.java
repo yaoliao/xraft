@@ -2,6 +2,7 @@ package com.yl.raft.core.node;
 
 import com.google.common.eventbus.EventBus;
 import com.yl.raft.core.log.Log;
+import com.yl.raft.core.node.config.NodeConfig;
 import com.yl.raft.core.node.store.NodeStore;
 import com.yl.raft.core.rpc.Connector;
 import com.yl.raft.core.schedule.Scheduler;
@@ -50,6 +51,11 @@ public class NodeContext {
      * 角色状态存储
      */
     private NodeStore store;
+
+    /**
+     * 配置信息
+     */
+    private NodeConfig config;
 
     private EventBus eventBus;
 

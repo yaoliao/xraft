@@ -1,9 +1,5 @@
-package com.yl.raft.core;
+package com.yl.raft.core.node;
 
-import com.yl.raft.core.node.NodeBuilder;
-import com.yl.raft.core.node.NodeEndpoint;
-import com.yl.raft.core.node.NodeId;
-import com.yl.raft.core.node.NodeImpl;
 import com.yl.raft.core.node.role.*;
 import com.yl.raft.core.rpc.MockConnector;
 import com.yl.raft.core.rpc.message.*;

@@ -1,6 +1,8 @@
 package com.yl.raft.core.node;
 
 import com.google.common.eventbus.EventBus;
+import com.yl.raft.core.log.Log;
+import com.yl.raft.core.log.MemoryLog;
 import com.yl.raft.core.node.config.NodeConfig;
 import com.yl.raft.core.node.store.MemoryNodeStore;
 import com.yl.raft.core.rpc.Connector;
@@ -24,6 +26,7 @@ public class NodeBuilder {
     private Scheduler scheduler;
     private Connector connector;
     private TaskExecutor taskExecutor;
+    private Log log;
 
     public NodeBuilder(NodeEndpoint endpoint) {
         this(Collections.singletonList(endpoint), endpoint.getId());
@@ -50,6 +53,11 @@ public class NodeBuilder {
         return this;
     }
 
+    public NodeBuilder setLog(Log log) {
+        this.log = log;
+        return this;
+    }
+
     public Node build() {
         return new NodeImpl(buildContext());
     }
@@ -63,6 +71,8 @@ public class NodeBuilder {
         nodeContext.setTaskExecutor(taskExecutor == null ? new SingleThreadTaskExecutor("node") : taskExecutor);
         nodeContext.setEventBus(eventBus);
         nodeContext.setStore(new MemoryNodeStore());
+        nodeContext.setLog(log == null ? new MemoryLog() : log);
+        nodeContext.setConfig(config);
         return nodeContext;
     }
 }

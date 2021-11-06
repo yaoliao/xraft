@@ -7,7 +7,7 @@
     </Appenders>
     <Loggers>
         <Logger name="in.yl.raft.core" level="debug"/>
-        <Root level="info">
+        <Root level="debug">
             <AppenderRef ref="STDOUT"/>
         </Root>
     </Loggers>
