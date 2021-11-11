@@ -1,0 +1,65 @@
+package com.yl.raft.core.rpc.nio;
+
+import com.yl.raft.core.Protos;
+import com.yl.raft.core.log.entry.EntryFactory;
+import com.yl.raft.core.node.NodeId;
+import com.yl.raft.core.rpc.message.*;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.MessageToMessageDecoder;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * Decoder 解码
+ */
+public class Decoder extends MessageToMessageDecoder<ByteBuf> {
+
+    private final EntryFactory entryFactory = new EntryFactory();
+
+    @Override
+    public void decode(ChannelHandlerContext channelHandlerContext, ByteBuf byteBuf, List<Object> out) throws Exception {
+        int messageType = byteBuf.readInt();
+        int payloadLength = byteBuf.readInt();
+        byte[] payload = new byte[payloadLength];
+        byteBuf.readBytes(payload);
+
+        switch (messageType) {
+            case MessageConstants.MSG_TYPE_NODE_ID:
+                out.add(new NodeId(new String(payload)));
+                break;
+            case MessageConstants.MSG_TYPE_REQUEST_VOTE_RPC:
+                Protos.RequestVoteRpc protoRVRpc = Protos.RequestVoteRpc.parseFrom(payload);
+                RequestVoteRpc rpc = new RequestVoteRpc();
+                rpc.setTerm(protoRVRpc.getTerm());
+                rpc.setCandidateId(new NodeId(protoRVRpc.getCandidateId()));
+                rpc.setLastLogIndex(protoRVRpc.getLastLogIndex());
+                rpc.setLastLogTerm(protoRVRpc.getLastLogTerm());
+                out.add(rpc);
+                break;
+            case MessageConstants.MSG_TYPE_REQUEST_VOTE_RESULT:
+                Protos.RequestVoteResult protoRVResult = Protos.RequestVoteResult.parseFrom(payload);
+                out.add(new RequestVoteResult(protoRVResult.getTerm(), protoRVResult.getVoteGranted()));
+                break;
+            case MessageConstants.MSG_TYPE_APPEND_ENTRIES_RPC:
+                Protos.AppendEntriesRpc protoAERpc = Protos.AppendEntriesRpc.parseFrom(payload);
+                AppendEntriesRpc aeRpc = new AppendEntriesRpc();
+                aeRpc.setMessageId(protoAERpc.getMessageId());
+                aeRpc.setTerm(protoAERpc.getTerm());
+                aeRpc.setLeaderId(new NodeId(protoAERpc.getLeaderId()));
+                aeRpc.setLeaderCommit(protoAERpc.getLeaderCommit());
+                aeRpc.setPrevLogIndex(protoAERpc.getPrevLogIndex());
+                aeRpc.setPrevLogTerm(protoAERpc.getPrevLogTerm());
+                aeRpc.setEntries(protoAERpc.getEntriesList().stream().map(e ->
+                        entryFactory.create(e.getKind(), e.getIndex(), e.getTerm(), e.getCommand().toByteArray())
+                ).collect(Collectors.toList()));
+                out.add(aeRpc);
+                break;
+            case MessageConstants.MSG_TYPE_APPEND_ENTRIES_RESULT:
+                Protos.AppendEntriesResult protoAEResult = Protos.AppendEntriesResult.parseFrom(payload);
+                out.add(new AppendEntriesResult(protoAEResult.getRpcMessageId(), protoAEResult.getTerm(), protoAEResult.getSuccess()));
+                break;
+        }
+    }
+}

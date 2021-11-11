@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * AbstractLog
@@ -50,6 +51,8 @@ public abstract class AbstractLog implements Log {
         }
 
         AppendEntriesRpc rpc = new AppendEntriesRpc();
+        // TODO messageId
+        rpc.setMessageId(UUID.randomUUID().toString());
         rpc.setTerm(term);
         rpc.setLeaderId(selfId);
         rpc.setLeaderCommit(commitIndex);
@@ -166,6 +169,7 @@ public abstract class AbstractLog implements Log {
             return;
         }
         // TODO commit 的日志也有可能被移除，这时候需要重新构建状态机
+        //  这里的 commit 指的是还没过半 commit 的日志，如果过半 commit 了，那日志就不会被移除
         log.debug("remove entries after {} ", index);
         entrySequence.removeAfter(index);
     }
@@ -184,6 +188,12 @@ public abstract class AbstractLog implements Log {
     }
 
     private boolean checkIfPreviousLogMatches(int prevLogIndex, int prevLogTerm) {
+        // TODO 如果 leader 之前没有过日志，这样是不是会有问题，prevLogIndex 永远都匹配不到,
+        //  是不是要判断 prevLogIndex == 0 的情况
+        if (prevLogIndex == 0) {
+            return true;
+        }
+
         EntryMeta entryMeta = entrySequence.getEntryMeta(prevLogIndex);
         if (entryMeta == null) {
             return false;

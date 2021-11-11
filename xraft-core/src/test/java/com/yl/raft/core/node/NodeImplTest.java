@@ -11,6 +11,7 @@ import org.junit.Test;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
@@ -166,11 +167,15 @@ public class NodeImplTest {
         node.replicateLog();
 
         node.onReceiveAppendEntriesResult(new AppendEntriesResultMessage(
-                new AppendEntriesResult(1, true),
+                new AppendEntriesResult(message(), 1, true),
                 NodeId.of("B"),
                 null,
                 new AppendEntriesRpc()
         ));
+    }
+
+    private String message() {
+        return UUID.randomUUID().toString();
     }
 
 }

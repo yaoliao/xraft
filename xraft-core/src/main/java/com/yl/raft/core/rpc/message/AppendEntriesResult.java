@@ -16,6 +16,8 @@ import java.io.Serializable;
 @AllArgsConstructor
 public class AppendEntriesResult implements Serializable {
 
+    private String messageId;
+
     /**
      * currentTerm, for leader to update itself
      */
@@ -25,6 +27,5 @@ public class AppendEntriesResult implements Serializable {
      * rue if follower contained entry matching prevLogIndex and prevLogTerm
      */
     private boolean success;
-
 
 }
