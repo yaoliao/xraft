@@ -10,6 +10,7 @@ import com.yl.raft.core.rpc.message.AppendEntriesRpc;
 import com.yl.raft.core.rpc.message.RequestVoteResult;
 import com.yl.raft.core.rpc.message.RequestVoteRpc;
 import com.yl.raft.core.rpc.nio.handler.FromRemoteHandler;
+import com.yl.raft.core.rpc.nio.handler.Spliter;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
@@ -77,6 +78,7 @@ public class NioConnector implements Connector {
                     @Override
                     protected void initChannel(SocketChannel ch) throws Exception {
                         ChannelPipeline pipeline = ch.pipeline();
+                        pipeline.addLast(new Spliter());
                         pipeline.addLast(new Decoder());
                         pipeline.addLast(new Encoder());
                         pipeline.addLast(new FromRemoteHandler(eventBus, inboundChannelGroup));

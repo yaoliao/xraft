@@ -9,7 +9,9 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * AbstractHandler
@@ -20,7 +22,9 @@ public class AbstractHandler extends ChannelDuplexHandler {
     protected final EventBus eventBus;
     protected NodeId remoteId;
     protected Channel channel;
-    private AppendEntriesRpc lastAppendEntriesRpc;
+    // TODO 书中这里的实现有问题 保存和获取 lastAppendEntriesRpc 的分别是 FromRemoteHandler 和 ToRemoteHandler，所以根本就取不到值
+    //  现在这样实现也有问题，这个 map 可能会一直膨胀，最好用 nodeId 作为 key
+    private static Map<String, AppendEntriesRpc> lastAppendEntriesRpcMap = new ConcurrentHashMap<>();
 
     public AbstractHandler(EventBus eventBus) {
         this.eventBus = eventBus;
@@ -42,14 +46,15 @@ public class AbstractHandler extends ChannelDuplexHandler {
             eventBus.post(new AppendEntriesRpcMessage(rpc, remoteId, channel));
         } else if (msg instanceof AppendEntriesResult) {
             AppendEntriesResult result = (AppendEntriesResult) msg;
-            if (lastAppendEntriesRpc == null) {
+            if (lastAppendEntriesRpcMap.get(result.getMessageId()) == null) {
                 log.warn("no last append entries rpc");
             } else {
-                if (!Objects.equals(result.getMessageId(), lastAppendEntriesRpc.getMessageId())) {
-                    log.warn("incorrect append entries rpc message id {}, expected {}", result.getMessageId(), lastAppendEntriesRpc.getMessageId());
+                if (!Objects.equals(result.getMessageId(), lastAppendEntriesRpcMap.get(result.getMessageId()).getMessageId())) {
+                    log.warn("incorrect append entries rpc message id {}, expected {}", result.getMessageId(),
+                            lastAppendEntriesRpcMap.get(result.getMessageId()).getMessageId());
                 } else {
-                    eventBus.post(new AppendEntriesResultMessage(result, remoteId, channel, lastAppendEntriesRpc));
-                    lastAppendEntriesRpc = null;
+                    eventBus.post(new AppendEntriesResultMessage(result, remoteId, channel, lastAppendEntriesRpcMap.get(result.getMessageId())));
+                    lastAppendEntriesRpcMap.remove(result.getMessageId());
                 }
             }
         }
@@ -58,7 +63,7 @@ public class AbstractHandler extends ChannelDuplexHandler {
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         if (msg instanceof AppendEntriesRpc) {
-            lastAppendEntriesRpc = (AppendEntriesRpc) msg;
+            lastAppendEntriesRpcMap.put(((AppendEntriesRpc) msg).getMessageId(), (AppendEntriesRpc) msg);
         }
         super.write(ctx, msg, promise);
     }

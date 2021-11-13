@@ -2,6 +2,7 @@ package com.yl.raft.core.node;
 
 import com.google.common.eventbus.Subscribe;
 import com.yl.raft.core.log.entry.EntryMeta;
+import com.yl.raft.core.log.statemachine.StateMachine;
 import com.yl.raft.core.node.role.*;
 import com.yl.raft.core.node.store.NodeStore;
 import com.yl.raft.core.rpc.message.*;
@@ -10,6 +11,7 @@ import com.yl.raft.core.schedule.LogReplicationTask;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
+import javax.annotation.Nonnull;
 import java.util.Objects;
 
 /**
@@ -48,6 +50,39 @@ public class NodeImpl implements Node {
         changeToRole(nodeRole);
 
         started = true;
+    }
+
+    @Override
+    public void registerStateMachine(@Nonnull StateMachine stateMachine) {
+        Objects.requireNonNull(stateMachine);
+        context.getLog().setStateMachine(stateMachine);
+    }
+
+    @Override
+    public void appendLog(@Nonnull byte[] commandBytes) {
+        Objects.requireNonNull(commandBytes);
+        ensureLeader();
+        context.getTaskExecutor().submit(() -> {
+            context.getLog().appendEntry(role.getTerm(), commandBytes);
+            doReplicateLog();
+        });
+    }
+
+    @Override
+    public RoleNameAndLeaderId getRoleNameAndLeaderId() {
+        return role.getNameAndLeaderId(context.getSelfId());
+    }
+
+    /**
+     * 判断是否是 leader
+     */
+    private void ensureLeader() {
+        RoleNameAndLeaderId result = role.getNameAndLeaderId(context.getSelfId());
+        if (result.getRoleName() == RoleName.LEADER) {
+            return;
+        }
+        NodeEndpoint endpoint = result.getLeaderId() != null ? context.getGroup().findMember(result.getLeaderId()).getEndpoint() : null;
+        throw new NotLeaderException(result.getRoleName(), endpoint);
     }
 
     private ElectionTimeout scheduleElectionTimeout() {
@@ -103,6 +138,7 @@ public class NodeImpl implements Node {
      */
     @Subscribe
     public void onReceiveRequestVoteRpc(RequestVoteRpcMessage rpcMessage) {
+        log.debug("======= 收到投票请求 ========");
         // 切换线程到主处理线程
         context.getTaskExecutor().submit(() -> context.getConnector().replyRequestVote(doProcessRequestVoteRpc(rpcMessage),
                 context.getGroup().findMember(rpcMessage.getSourceNodeId()).getEndpoint()));
@@ -173,6 +209,7 @@ public class NodeImpl implements Node {
             if (member.advanceReplicatingState(message.getAppendEntriesRpc().getLastEntryIndex())) {
                 // 推进 leader 的 commitIndex
                 context.getLog().advanceCommitIndex(context.getGroup().getMatchIndex(), role.getTerm());
+                log.debug("advance leader commitIndex.  leader commit index: {}", context.getLog().getCommitIndex());
             }
         } else {
             // follower 追加日志失败，将 nextIndex - 1 然后，重新发送 AppendEntriesRPC
@@ -306,7 +343,7 @@ public class NodeImpl implements Node {
      */
     private void doProcessRequestVoteResult(RequestVoteResult voteResult) {
         // 任期大于自己则转变为 Follower
-        if (role.getTerm() > voteResult.getTerm()) {
+        if (role.getTerm() < voteResult.getTerm()) {
             becomeFollower(voteResult.getTerm(), null, null, true);
             return;
         }

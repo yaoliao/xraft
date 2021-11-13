@@ -5,6 +5,8 @@ import com.yl.raft.core.log.entry.EntryMeta;
 import com.yl.raft.core.log.entry.GeneralEntry;
 import com.yl.raft.core.log.entry.NoOpEntry;
 import com.yl.raft.core.log.sequence.EntrySequence;
+import com.yl.raft.core.log.statemachine.StateMachine;
+import com.yl.raft.core.log.statemachine.StateMachineContext;
 import com.yl.raft.core.node.NodeId;
 import com.yl.raft.core.rpc.message.AppendEntriesRpc;
 import lombok.Getter;
@@ -25,6 +27,10 @@ public abstract class AbstractLog implements Log {
 
     protected int commitIndex;
 
+    protected StateMachine stateMachine;
+
+    private final StateMachineContext stateMachineContext = new StateMachineContextImpl();
+
     @Override
     public int getNextIndex() {
         return entrySequence.getNextLogIndex();
@@ -38,7 +44,7 @@ public abstract class AbstractLog implements Log {
     @Override
     public EntryMeta getLastEntryMeta() {
         if (entrySequence.isEmpty()) {
-            new EntryMeta(Entry.KIND_NO_OP, 0, 0);
+            return new EntryMeta(Entry.KIND_NO_OP, 0, 0);
         }
         return entrySequence.getLastEntry().getMeta();
     }
@@ -119,14 +125,39 @@ public abstract class AbstractLog implements Log {
         }
         log.debug("advance commit index from {} to {}", commitIndex, newCommitIndex);
         entrySequence.commit(newCommitIndex);
+        commitIndex = newCommitIndex;
 
-        // TODO
-        //advanceApplyIndex();
+        // 推进 applyIndex
+        advanceApplyIndex();
+    }
+
+    private void advanceApplyIndex() {
+        int lastApplied = stateMachine.getLastApplied();
+        for (Entry entry : entrySequence.subList(lastApplied + 1, commitIndex + 1)) {
+            applyEntry(entry);
+        }
+    }
+
+    @Override
+    public void setStateMachine(StateMachine stateMachine) {
+        this.stateMachine = stateMachine;
     }
 
     @Override
     public void close() {
         entrySequence.close();
+        stateMachine.shutdown();
+    }
+
+    private void applyEntry(Entry entry) {
+        // skip no-op entry and membership-change entry
+        if (isApplicable(entry)) {
+            stateMachine.applyLog(stateMachineContext, entry.getIndex(), entry.getCommandBytes(), entrySequence.getFirstLogIndex());
+        }
+    }
+
+    private boolean isApplicable(Entry entry) {
+        return entry.getKind() == Entry.KIND_GENERAL;
     }
 
     private boolean validateNewCommitIndex(int newCommitIndex, int currentTerm) {
@@ -239,5 +270,11 @@ public abstract class AbstractLog implements Log {
         public Iterator<Entry> iterator() {
             return entries.iterator();
         }
+    }
+
+    private class StateMachineContextImpl implements StateMachineContext {
+
+        // TODO 快照
+
     }
 }

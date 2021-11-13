@@ -113,6 +113,14 @@ public class NodeGroup {
         return matchIndices.get(count / 2).getMatchIndex();
     }
 
+    boolean isStandalone() {
+        return memberMap.size() == 1 && memberMap.containsKey(selfId);
+    }
+
+    public GroupMember findSelf() {
+        return memberMap.get(selfId);
+    }
+
     /**
      * Node match index.
      *
@@ -143,4 +151,5 @@ public class NodeGroup {
         }
 
     }
+
 }

@@ -3,6 +3,7 @@ package com.yl.raft.core.node;
 import lombok.Getter;
 import lombok.NonNull;
 import lombok.Setter;
+import lombok.ToString;
 
 import javax.annotation.Nonnull;
 import java.io.Serializable;
@@ -13,6 +14,7 @@ import java.util.Objects;
  */
 @Getter
 @Setter
+@ToString
 public class NodeId implements Serializable {
 
     private final String value;
