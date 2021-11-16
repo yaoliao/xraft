@@ -115,19 +115,27 @@ public class NodeImpl implements Node {
         // 取消原定时任务
         role.cancelTimeOutOrTask();
 
-        // 转变角色为 Candidate
-        changeToRole(new CandidateNodeRole(newTerm, scheduleElectionTimeout()));
+        if (context.getGroup().isStandalone()) {
+            // become leader
+            log.info("become leader in standalone model, term {}", newTerm);
+            resetReplicatingStates();
+            changeToRole(new LeaderNodeRole(newTerm, scheduleLogReplicationTask()));
+            context.getLog().appendEntry(newTerm); // no-op log
+        } else {
+            // 转变角色为 Candidate
+            changeToRole(new CandidateNodeRole(newTerm, scheduleElectionTimeout()));
 
-        // 向所有节点发送选举投票
-        RequestVoteRpc requestVoteRpc = new RequestVoteRpc();
-        requestVoteRpc.setTerm(newTerm);
-        requestVoteRpc.setCandidateId(context.getSelfId());
-        // 日志相关处理
-        EntryMeta lastEntryMeta = context.getLog().getLastEntryMeta();
-        requestVoteRpc.setLastLogIndex(lastEntryMeta.getIndex());
-        requestVoteRpc.setLastLogTerm(lastEntryMeta.getTerm());
-        // 发起投票
-        context.getConnector().sendRequestVote(requestVoteRpc, context.getGroup().listEndpointOfMajorExceptSelf());
+            // 向所有节点发送选举投票
+            RequestVoteRpc requestVoteRpc = new RequestVoteRpc();
+            requestVoteRpc.setTerm(newTerm);
+            requestVoteRpc.setCandidateId(context.getSelfId());
+            // 日志相关处理
+            EntryMeta lastEntryMeta = context.getLog().getLastEntryMeta();
+            requestVoteRpc.setLastLogIndex(lastEntryMeta.getIndex());
+            requestVoteRpc.setLastLogTerm(lastEntryMeta.getTerm());
+            // 发起投票
+            context.getConnector().sendRequestVote(requestVoteRpc, context.getGroup().listEndpointOfMajorExceptSelf());
+        }
     }
 
 
@@ -406,8 +414,13 @@ public class NodeImpl implements Node {
     }
 
     private void doReplicateLog() {
-        log.debug("replicate log");
+        if (context.getGroup().isStandalone()) {
+            log.info("doReplicateLog in standalone model");
+            context.getLog().advanceCommitIndex(context.getLog().getNextIndex() - 1, role.getTerm());
+            return;
+        }
 
+        log.debug("replicate log");
         for (GroupMember member : context.getGroup().listReplicationTarget()) {
             doReplicateLog(member, context.getConfig().getMaxReplicationEntries());
         }
