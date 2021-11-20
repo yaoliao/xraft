@@ -79,7 +79,7 @@ public class NodeBuilder {
         if (!dataDir.isDirectory() || !dataDir.exists()) {
             throw new IllegalArgumentException("[" + dataDirPath + "] not a directory, or not exists");
         }
-        log = new FileLog(dataDir);
+        log = new FileLog(dataDir, eventBus);
         store = new FileNodeStore(new File(dataDir, FileNodeStore.FILE_NAME));
         return this;
     }
@@ -108,7 +108,7 @@ public class NodeBuilder {
         nodeContext.setTaskExecutor(taskExecutor == null ? new SingleThreadTaskExecutor("node") : taskExecutor);
         nodeContext.setEventBus(eventBus);
         nodeContext.setStore(store == null ? new MemoryNodeStore() : store);
-        nodeContext.setLog(log == null ? new MemoryLog() : log);
+        nodeContext.setLog(log == null ? new MemoryLog(eventBus) : log);
         nodeContext.setConfig(config);
         return nodeContext;
     }

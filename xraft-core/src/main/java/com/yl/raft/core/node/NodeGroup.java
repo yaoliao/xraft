@@ -64,6 +64,16 @@ public class NodeGroup {
         return endpoints;
     }
 
+    Set<NodeEndpoint> listEndpointOfMajor() {
+        Set<NodeEndpoint> endpoints = new HashSet<>();
+        for (GroupMember member : memberMap.values()) {
+//            if (member.isMajor()) {
+                endpoints.add(member.getEndpoint());
+//            }
+        }
+        return endpoints;
+    }
+
     Collection<GroupMember> listReplicationTarget() {
         return memberMap.values().stream().filter(m -> !m.getEndpoint().getId().equals(selfId)).collect(Collectors.toList());
     }

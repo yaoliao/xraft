@@ -1,13 +1,18 @@
 package com.yl.raft.kvstore.server;
 
+import com.google.protobuf.ByteString;
 import com.yl.raft.core.log.statemachine.AbstractSingleThreadStateMachine;
 import com.yl.raft.core.node.Node;
 import com.yl.raft.core.node.role.RoleName;
 import com.yl.raft.core.node.role.RoleNameAndLeaderId;
+import com.yl.raft.kvstore.Protos;
 import com.yl.raft.kvstore.message.*;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Nonnull;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,7 +27,7 @@ public class Service {
 
     private final ConcurrentHashMap<String, CommandRequest<?>> pendingCommands = new ConcurrentHashMap<>();
 
-    private final Map<String, byte[]> map = new HashMap<>();
+    private Map<String, byte[]> map = new HashMap<>();
 
     public Service(Node node) {
         this.node = node;
@@ -66,6 +71,24 @@ public class Service {
         return null;
     }
 
+    public static void toSnapshot(Map<String, byte[]> map, OutputStream outputStream) throws IOException {
+        Protos.EntryList.Builder builder = Protos.EntryList.newBuilder();
+        map.forEach((k, v) ->
+                builder.addEntries(Protos.EntryList.Entry.newBuilder()
+                        .setKey(k)
+                        .setValue(ByteString.copyFrom(v)).build()));
+        builder.build().writeTo(outputStream);
+    }
+
+    public static Map<String, byte[]> fromSnapshot(InputStream inputStream) throws IOException {
+        Map<String, byte[]> map = new HashMap<>();
+        Protos.EntryList entryList = Protos.EntryList.parseFrom(inputStream);
+        for (Protos.EntryList.Entry entry : entryList.getEntriesList()) {
+            map.put(entry.getKey(), entry.getValue().toByteArray());
+        }
+        return map;
+    }
+
 
     private class StateMachineImpl extends AbstractSingleThreadStateMachine {
 
@@ -77,6 +100,21 @@ public class Service {
             if (commandRequest != null) {
                 commandRequest.reply(Success.INSTANCE);
             }
+        }
+
+        @Override
+        protected void doApplySnapshot(@Nonnull InputStream input) throws IOException {
+            map = fromSnapshot(input);
+        }
+
+        @Override
+        public boolean shouldGenerateSnapshot(int firstLogIndex, int lastApplied) {
+            return lastApplied - firstLogIndex > 1;
+        }
+
+        @Override
+        public void generateSnapshot(@Nonnull OutputStream output) throws IOException {
+            toSnapshot(map, output);
         }
 
     }

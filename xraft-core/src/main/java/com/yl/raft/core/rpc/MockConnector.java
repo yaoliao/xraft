@@ -2,10 +2,7 @@ package com.yl.raft.core.rpc;
 
 import com.yl.raft.core.node.NodeEndpoint;
 import com.yl.raft.core.node.NodeId;
-import com.yl.raft.core.rpc.message.AppendEntriesResult;
-import com.yl.raft.core.rpc.message.AppendEntriesRpc;
-import com.yl.raft.core.rpc.message.RequestVoteResult;
-import com.yl.raft.core.rpc.message.RequestVoteRpc;
+import com.yl.raft.core.rpc.message.*;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
@@ -67,6 +64,22 @@ public class MockConnector implements Connector {
         message.setResult(result);
         message.setDestinationNodeId(destinationEndpoint.getId());
         messages.add(message);
+    }
+
+    @Override
+    public void sendInstallSnapshot(@Nonnull InstallSnapshotRpc rpc, @Nonnull NodeEndpoint destinationEndpoint) {
+        Message m = new Message();
+        m.rpc = rpc;
+        m.destinationNodeId = destinationEndpoint.getId();
+        messages.add(m);
+    }
+
+    @Override
+    public void replyInstallSnapshot(@Nonnull InstallSnapshotResult result, @Nonnull InstallSnapshotRpcMessage rpcMessage) {
+        Message m = new Message();
+        m.result = result;
+        m.destinationNodeId = rpcMessage.getSourceNodeId();
+        messages.add(m);
     }
 
     public Message getLastMessage() {

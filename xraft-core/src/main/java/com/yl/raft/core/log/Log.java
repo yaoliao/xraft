@@ -5,10 +5,13 @@ import com.yl.raft.core.log.entry.EntryMeta;
 import com.yl.raft.core.log.entry.GeneralEntry;
 import com.yl.raft.core.log.entry.NoOpEntry;
 import com.yl.raft.core.log.statemachine.StateMachine;
+import com.yl.raft.core.node.NodeEndpoint;
 import com.yl.raft.core.node.NodeId;
 import com.yl.raft.core.rpc.message.AppendEntriesRpc;
+import com.yl.raft.core.rpc.message.InstallSnapshotRpc;
 
 import java.util.List;
+import java.util.Set;
 
 public interface Log {
 
@@ -62,7 +65,34 @@ public interface Log {
     /**
      * 设置状态机
      */
-     void setStateMachine(StateMachine stateMachine);
+    void setStateMachine(StateMachine stateMachine);
+
+    /**
+     * Install snapshot.
+     *
+     * @param rpc rpc
+     * @return install snapshot state
+     */
+    InstallSnapshotState installSnapshot(InstallSnapshotRpc rpc);
+
+    /**
+     * Generate snapshot.
+     *
+     * @param lastIncludedIndex last included index
+     * @param groupConfig       group config
+     */
+    void generateSnapshot(int lastIncludedIndex, Set<NodeEndpoint> groupConfig);
+
+    /**
+     * Create install snapshot rpc from log.
+     *
+     * @param term   current term
+     * @param selfId self node id
+     * @param offset data offset
+     * @param length data length
+     * @return install snapshot rpc
+     */
+    InstallSnapshotRpc createInstallSnapshotRpc(int term, NodeId selfId, int offset, int length);
 
     /**
      * 关闭

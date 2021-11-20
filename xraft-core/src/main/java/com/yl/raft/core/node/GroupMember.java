@@ -2,8 +2,6 @@ package com.yl.raft.core.node;
 
 import lombok.Getter;
 
-import java.util.Objects;
-
 /**
  * GroupMember TODO
  */
@@ -14,8 +12,7 @@ public class GroupMember {
     private ReplicatingState replicatingState;
 
     public GroupMember(NodeEndpoint endpoint) {
-        Objects.requireNonNull(endpoint);
-        this.endpoint = endpoint;
+        this(endpoint, null);
     }
 
     public GroupMember(NodeEndpoint endpoint, ReplicatingState replicatingState) {
@@ -60,5 +57,44 @@ public class GroupMember {
 
     public boolean backOfNextIndex() {
         return ensureReplicatingState().backOffNextIndex();
+    }
+
+    // =================  快照相关 ==================
+
+    void replicateNow() {
+        replicateAt(System.currentTimeMillis());
+    }
+
+    void replicateAt(long replicatedAt) {
+        ReplicatingState replicatingState = ensureReplicatingState();
+        replicatingState.setReplicating(true);
+        replicatingState.setLastReplicatedAt(replicatedAt);
+    }
+
+    boolean isReplicating() {
+        return ensureReplicatingState().isReplicating();
+    }
+
+    void stopReplicating() {
+        ensureReplicatingState().setReplicating(false);
+    }
+
+    /**
+     * Test if should replicate.
+     * <p>
+     * Return true if
+     * <ol>
+     * <li>not replicating</li>
+     * <li>replicated but no response in specified timeout</li>
+     * </ol>
+     * </p>
+     *
+     * @param readTimeout read timeout
+     * @return true if should, otherwise false
+     */
+    boolean shouldReplicate(long readTimeout) {
+        ReplicatingState replicatingState = ensureReplicatingState();
+        return !replicatingState.isReplicating() ||
+                System.currentTimeMillis() - replicatingState.getLastReplicatedAt() >= readTimeout;
     }
 }

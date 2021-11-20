@@ -1,9 +1,6 @@
 package com.yl.raft.core.rpc;
 
-import com.yl.raft.core.rpc.message.AppendEntriesResult;
-import com.yl.raft.core.rpc.message.AppendEntriesRpc;
-import com.yl.raft.core.rpc.message.RequestVoteResult;
-import com.yl.raft.core.rpc.message.RequestVoteRpc;
+import com.yl.raft.core.rpc.message.*;
 
 import javax.annotation.Nonnull;
 
@@ -36,6 +33,20 @@ public interface Channel {
      * @param result result
      */
     void writeAppendEntriesResult(@Nonnull AppendEntriesResult result);
+
+    /**
+     * Write install snapshot rpc.
+     *
+     * @param rpc rpc
+     */
+    void writeInstallSnapshotRpc(@Nonnull InstallSnapshotRpc rpc);
+
+    /**
+     * Write install snapshot result.
+     *
+     * @param result result
+     */
+    void writeInstallSnapshotResult(@Nonnull InstallSnapshotResult result);
 
 
     /**

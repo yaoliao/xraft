@@ -20,4 +20,8 @@ public class NodeEndpoint {
     public int getPort() {
         return address.getPort();
     }
+
+    public String getHost() {
+        return address.getHost();
+    }
 }

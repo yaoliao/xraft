@@ -1,14 +1,12 @@
 package com.yl.raft.core.rpc.nio;
 
+import com.google.common.base.Preconditions;
 import com.google.common.eventbus.EventBus;
 import com.yl.raft.core.node.NodeEndpoint;
 import com.yl.raft.core.node.NodeId;
 import com.yl.raft.core.rpc.Channel;
 import com.yl.raft.core.rpc.Connector;
-import com.yl.raft.core.rpc.message.AppendEntriesResult;
-import com.yl.raft.core.rpc.message.AppendEntriesRpc;
-import com.yl.raft.core.rpc.message.RequestVoteResult;
-import com.yl.raft.core.rpc.message.RequestVoteRpc;
+import com.yl.raft.core.rpc.message.*;
 import com.yl.raft.core.rpc.nio.handler.FromRemoteHandler;
 import com.yl.raft.core.rpc.nio.handler.Spliter;
 import io.netty.bootstrap.ServerBootstrap;
@@ -118,6 +116,22 @@ public class NioConnector implements Connector {
     public void replyAppendEntries(@Nonnull AppendEntriesResult result, @Nonnull NodeEndpoint destinationEndpoint) {
         log.debug("reply {} to node {}", result, destinationEndpoint.getId());
         executorService.execute(() -> getChannel(destinationEndpoint).writeAppendEntriesResult(result));
+    }
+
+    @Override
+    public void sendInstallSnapshot(@Nonnull InstallSnapshotRpc rpc, @Nonnull NodeEndpoint destinationEndpoint) {
+        Preconditions.checkNotNull(rpc);
+        Preconditions.checkNotNull(destinationEndpoint);
+        log.debug("send {} to node {}", rpc, destinationEndpoint.getId());
+        getChannel(destinationEndpoint).writeInstallSnapshotRpc(rpc);
+    }
+
+    @Override
+    public void replyInstallSnapshot(@Nonnull InstallSnapshotResult result, @Nonnull InstallSnapshotRpcMessage rpcMessage) {
+        Preconditions.checkNotNull(result);
+        Preconditions.checkNotNull(rpcMessage);
+        log.debug("reply {} to node {}", result, rpcMessage.getSourceNodeId());
+        rpcMessage.getChannel().writeInstallSnapshotResult(result);
     }
 
     @Override

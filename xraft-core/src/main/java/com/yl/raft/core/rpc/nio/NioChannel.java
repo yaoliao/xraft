@@ -2,10 +2,7 @@ package com.yl.raft.core.rpc.nio;
 
 import com.yl.raft.core.rpc.Channel;
 import com.yl.raft.core.rpc.ChannelException;
-import com.yl.raft.core.rpc.message.AppendEntriesResult;
-import com.yl.raft.core.rpc.message.AppendEntriesRpc;
-import com.yl.raft.core.rpc.message.RequestVoteResult;
-import com.yl.raft.core.rpc.message.RequestVoteRpc;
+import com.yl.raft.core.rpc.message.*;
 
 import javax.annotation.Nonnull;
 
@@ -37,6 +34,16 @@ public class NioChannel implements Channel {
 
     @Override
     public void writeAppendEntriesResult(@Nonnull AppendEntriesResult result) {
+        nettyChannel.writeAndFlush(result);
+    }
+
+    @Override
+    public void writeInstallSnapshotRpc(@Nonnull InstallSnapshotRpc rpc) {
+        nettyChannel.writeAndFlush(rpc);
+    }
+
+    @Override
+    public void writeInstallSnapshotResult(@Nonnull InstallSnapshotResult result) {
         nettyChannel.writeAndFlush(result);
     }
 

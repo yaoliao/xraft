@@ -24,7 +24,8 @@ public class AbstractHandler extends ChannelDuplexHandler {
     protected Channel channel;
     // TODO 书中这里的实现有问题 保存和获取 lastAppendEntriesRpc 的分别是 FromRemoteHandler 和 ToRemoteHandler，所以根本就取不到值
     //  现在这样实现也有问题，这个 map 可能会一直膨胀，最好用 nodeId 作为 key
-    private static Map<String, AppendEntriesRpc> lastAppendEntriesRpcMap = new ConcurrentHashMap<>();
+    private static final Map<String, AppendEntriesRpc> lastAppendEntriesRpcMap = new ConcurrentHashMap<>();
+    private static final Map<String, InstallSnapshotRpc> lastInstallSnapshotRpcMap = new ConcurrentHashMap<>();
 
     public AbstractHandler(EventBus eventBus) {
         this.eventBus = eventBus;
@@ -57,6 +58,22 @@ public class AbstractHandler extends ChannelDuplexHandler {
                     lastAppendEntriesRpcMap.remove(result.getMessageId());
                 }
             }
+        } else if (msg instanceof InstallSnapshotRpc) {
+            InstallSnapshotRpc rpc = (InstallSnapshotRpc) msg;
+            eventBus.post(new InstallSnapshotRpcMessage(rpc, remoteId, channel));
+        } else if (msg instanceof InstallSnapshotResult) {
+            InstallSnapshotResult result = (InstallSnapshotResult) msg;
+            if (lastInstallSnapshotRpcMap.get(result.getMessageId()) == null) {
+                log.warn("no last Install Snapshot rpc");
+            } else {
+                if (!Objects.equals(result.getMessageId(), lastInstallSnapshotRpcMap.get(result.getMessageId()).getMessageId())) {
+                    log.warn("incorrect Install Snapshot rpc message id {}, expected {}", result.getMessageId(),
+                            lastInstallSnapshotRpcMap.get(result.getMessageId()).getMessageId());
+                } else {
+                    eventBus.post(new InstallSnapshotResultMessage(result, remoteId, lastInstallSnapshotRpcMap.get(result.getMessageId())));
+                    lastInstallSnapshotRpcMap.remove(result.getMessageId());
+                }
+            }
         }
     }
 
@@ -64,6 +81,8 @@ public class AbstractHandler extends ChannelDuplexHandler {
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         if (msg instanceof AppendEntriesRpc) {
             lastAppendEntriesRpcMap.put(((AppendEntriesRpc) msg).getMessageId(), (AppendEntriesRpc) msg);
+        } else if (msg instanceof InstallSnapshotRpc) {
+            lastInstallSnapshotRpcMap.put(((InstallSnapshotRpc) msg).getMessageId(), (InstallSnapshotRpc) msg);
         }
         super.write(ctx, msg, promise);
     }

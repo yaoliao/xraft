@@ -1,21 +1,24 @@
 package com.yl.raft.core.log;
 
+import com.google.common.eventbus.EventBus;
 import com.yl.raft.core.log.entry.Entry;
 import com.yl.raft.core.log.entry.EntryMeta;
 import com.yl.raft.core.log.entry.GeneralEntry;
 import com.yl.raft.core.log.entry.NoOpEntry;
+import com.yl.raft.core.log.event.SnapshotGenerateEvent;
 import com.yl.raft.core.log.sequence.EntrySequence;
+import com.yl.raft.core.log.snapshot.*;
 import com.yl.raft.core.log.statemachine.StateMachine;
 import com.yl.raft.core.log.statemachine.StateMachineContext;
+import com.yl.raft.core.node.NodeEndpoint;
 import com.yl.raft.core.node.NodeId;
 import com.yl.raft.core.rpc.message.AppendEntriesRpc;
+import com.yl.raft.core.rpc.message.InstallSnapshotRpc;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.UUID;
+import java.io.IOException;
+import java.util.*;
 
 /**
  * AbstractLog
@@ -31,6 +34,16 @@ public abstract class AbstractLog implements Log {
 
     private final StateMachineContext stateMachineContext = new StateMachineContextImpl();
 
+    protected Snapshot snapshot;
+
+    protected SnapshotBuilder snapshotBuilder = new NullSnapshotBuilder();
+
+    protected final EventBus eventBus;
+
+    AbstractLog(EventBus eventBus) {
+        this.eventBus = eventBus;
+    }
+
     @Override
     public int getNextIndex() {
         return entrySequence.getNextLogIndex();
@@ -44,7 +57,7 @@ public abstract class AbstractLog implements Log {
     @Override
     public EntryMeta getLastEntryMeta() {
         if (entrySequence.isEmpty()) {
-            return new EntryMeta(Entry.KIND_NO_OP, 0, 0);
+            return new EntryMeta(Entry.KIND_NO_OP, snapshot.getLastIncludedIndex(), snapshot.getLastIncludedTerm());
         }
         return entrySequence.getLastEntry().getMeta();
     }
@@ -56,6 +69,10 @@ public abstract class AbstractLog implements Log {
             throw new IllegalArgumentException("illegal next index " + nextIndex);
         }
 
+        if (nextIndex <= snapshot.getLastIncludedIndex()) {
+            throw new EntryInSnapshotException(nextIndex);
+        }
+
         AppendEntriesRpc rpc = new AppendEntriesRpc();
         // TODO messageId
         rpc.setMessageId(UUID.randomUUID().toString());
@@ -63,11 +80,16 @@ public abstract class AbstractLog implements Log {
         rpc.setLeaderId(selfId);
         rpc.setLeaderCommit(commitIndex);
 
-        // 设置前一条日志信息
-        Entry preEntry = entrySequence.getEntry(nextIndex - 1);
-        if (preEntry != null) {
-            rpc.setPrevLogIndex(preEntry.getIndex());
-            rpc.setPrevLogTerm(preEntry.getTerm());
+        if (nextIndex == snapshot.getLastIncludedIndex() + 1) {
+            rpc.setPrevLogIndex(snapshot.getLastIncludedIndex());
+            rpc.setPrevLogTerm(snapshot.getLastIncludedTerm());
+        } else {
+            // 设置前一条日志信息
+            Entry preEntry = entrySequence.getEntry(nextIndex - 1);
+            if (preEntry != null) {
+                rpc.setPrevLogIndex(preEntry.getIndex());
+                rpc.setPrevLogTerm(preEntry.getTerm());
+            }
         }
         if (!entrySequence.isEmpty()) {
             int maxIndex = (maxEntries == ALL_ENTRIES ? nextLogIndex : Math.min(nextLogIndex, nextIndex + maxEntries));
@@ -133,6 +155,12 @@ public abstract class AbstractLog implements Log {
 
     private void advanceApplyIndex() {
         int lastApplied = stateMachine.getLastApplied();
+        int lastIncludedIndex = snapshot.getLastIncludedIndex();
+        if (lastApplied == 0 && lastIncludedIndex > 0) {
+            assert commitIndex >= lastIncludedIndex;
+            applySnapshot(snapshot);
+            lastApplied = lastIncludedIndex;
+        }
         for (Entry entry : entrySequence.subList(lastApplied + 1, commitIndex + 1)) {
             applyEntry(entry);
         }
@@ -144,8 +172,72 @@ public abstract class AbstractLog implements Log {
     }
 
     @Override
+    public InstallSnapshotState installSnapshot(InstallSnapshotRpc rpc) {
+        if (rpc.getLastIndex() <= snapshot.getLastIncludedIndex()) {
+            log.debug("snapshot's last included index from rpc <= current one ({} <= {}), ignore",
+                    rpc.getLastIndex(), snapshot.getLastIncludedIndex());
+            return new InstallSnapshotState(InstallSnapshotState.StateName.ILLEGAL_INSTALL_SNAPSHOT_RPC);
+        }
+
+        // 偏移量为 0，重新构建快照
+        if (rpc.getOffset() == 0) {
+            assert rpc.getLastConfig() != null;
+            snapshotBuilder.close();
+            snapshotBuilder = newSnapshotBuilder(rpc);
+        } else {
+            // 追加快照
+            snapshotBuilder.append(rpc);
+        }
+
+        // 快照数据未完成传输
+        if (!rpc.isDone()) {
+            return new InstallSnapshotState(InstallSnapshotState.StateName.INSTALLING);
+        }
+
+        // 快照全都传输完成
+        Snapshot newSnapshot = snapshotBuilder.build();
+        applySnapshot(newSnapshot);
+        replaceSnapshot(newSnapshot);
+        int lastIncludedIndex = snapshot.getLastIncludedIndex();
+        if (commitIndex < lastIncludedIndex) {
+            commitIndex = lastIncludedIndex;
+        }
+        return new InstallSnapshotState(InstallSnapshotState.StateName.INSTALLED, newSnapshot.getLastConfig());
+    }
+
+    @Override
+    public void generateSnapshot(int lastIncludedIndex, Set<NodeEndpoint> groupConfig) {
+        log.info("generate snapshot, last included index {}", lastIncludedIndex);
+        EntryMeta lastAppliedEntryMeta = entrySequence.getEntryMeta(lastIncludedIndex);
+        replaceSnapshot(generateSnapshot(lastAppliedEntryMeta, groupConfig));
+    }
+
+    @Override
+    public InstallSnapshotRpc createInstallSnapshotRpc(int term, NodeId selfId, int offset, int length) {
+        InstallSnapshotRpc rpc = new InstallSnapshotRpc();
+        rpc.setTerm(term);
+        rpc.setLeaderId(selfId);
+        rpc.setLastIndex(snapshot.getLastIncludedIndex());
+        rpc.setLastTerm(snapshot.getLastIncludedTerm());
+        if (offset == 0) {
+            rpc.setLastConfig(snapshot.getLastConfig());
+        }
+        rpc.setOffset(offset);
+
+        SnapshotChunk chunk = snapshot.readData(offset, length);
+        rpc.setData(chunk.getBytes());
+        rpc.setDone(chunk.isLastChunk());
+
+        rpc.setMessageId(UUID.randomUUID().toString());
+        return rpc;
+    }
+
+
+    @Override
     public void close() {
+        snapshot.close();
         entrySequence.close();
+        snapshotBuilder.close();
         stateMachine.shutdown();
     }
 
@@ -196,13 +288,22 @@ public abstract class AbstractLog implements Log {
     }
 
     private void removeEntriesAfter(int index) {
-        if (entrySequence.isEmpty() || index > entrySequence.getLastLogIndex()) {
+        //  在 checkIfPreviousLogMatches 方法已经对日志快照做了判断，这里不需要判断快照的情况了
+        if (entrySequence.isEmpty() || index >= entrySequence.getLastLogIndex()) {
             return;
         }
-        // TODO commit 的日志也有可能被移除，这时候需要重新构建状态机
-        //  这里的 commit 指的是还没过半 commit 的日志，如果过半 commit 了，那日志就不会被移除
-        log.debug("remove entries after {} ", index);
+        int lastApplied = stateMachine.getLastApplied();
+        if (index < lastApplied && entrySequence.subList(index + 1, lastApplied + 1).stream().anyMatch(this::isApplicable)) {
+            log.warn("applied log removed, reapply from start");
+            applySnapshot(snapshot);
+            log.debug("apply log from {} to {}", entrySequence.getFirstLogIndex(), index);
+            entrySequence.subList(entrySequence.getFirstLogIndex(), index + 1).forEach(this::applyEntry);
+        }
+        log.debug("remove entries after {}", index);
         entrySequence.removeAfter(index);
+        if (index < commitIndex) {
+            commitIndex = index;
+        }
     }
 
     private int findFirstUnmatchedLog(EntrySequenceView leaderEntries) {
@@ -219,6 +320,22 @@ public abstract class AbstractLog implements Log {
     }
 
     private boolean checkIfPreviousLogMatches(int prevLogIndex, int prevLogTerm) {
+
+        int lastIncludedIndex = snapshot.getLastIncludedIndex();
+        if (prevLogIndex < lastIncludedIndex) {
+            log.debug("previous log index {} < snapshot's last included index {}", prevLogIndex, lastIncludedIndex);
+            return false;
+        }
+        if (prevLogIndex == lastIncludedIndex) {
+            int lastIncludedTerm = snapshot.getLastIncludedTerm();
+            if (prevLogTerm != lastIncludedTerm) {
+                log.debug("previous log index matches snapshot's last included index, " +
+                        "but term not (expected {}, actual {})", lastIncludedTerm, prevLogTerm);
+                return false;
+            }
+            return true;
+        }
+
         // TODO 如果 leader 之前没有过日志，这样是不是会有问题，prevLogIndex 永远都匹配不到,
         //  是不是要判断 prevLogIndex == 0 的情况
         if (prevLogIndex == 0) {
@@ -232,6 +349,21 @@ public abstract class AbstractLog implements Log {
         int term = entryMeta.getTerm();
         return term == prevLogTerm;
     }
+
+    private void applySnapshot(Snapshot snapshot) {
+        log.debug("apply snapshot, last included index {}", snapshot.getLastIncludedIndex());
+        try {
+            stateMachine.applySnapshot(snapshot);
+        } catch (IOException e) {
+            throw new LogException("failed to apply snapshot", e);
+        }
+    }
+
+    protected abstract void replaceSnapshot(Snapshot newSnapshot);
+
+    protected abstract SnapshotBuilder newSnapshotBuilder(InstallSnapshotRpc firstRpc);
+
+    protected abstract Snapshot generateSnapshot(EntryMeta lastAppliedEntryMeta, Set<NodeEndpoint> groupConfig);
 
     @Getter
     private static class EntrySequenceView implements Iterable<Entry> {
@@ -274,7 +406,10 @@ public abstract class AbstractLog implements Log {
 
     private class StateMachineContextImpl implements StateMachineContext {
 
-        // TODO 快照
-
+        // 快照
+        @Override
+        public void generateSnapshot(int lastIncludedIndex) {
+            eventBus.post(new SnapshotGenerateEvent(lastIncludedIndex));
+        }
     }
 }

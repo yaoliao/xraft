@@ -1,10 +1,13 @@
 package com.yl.raft.core.log.statemachine;
 
+import com.yl.raft.core.log.snapshot.Snapshot;
 import com.yl.raft.core.support.SingleThreadTaskExecutor;
 import com.yl.raft.core.support.TaskExecutor;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Nonnull;
+import java.io.IOException;
+import java.io.InputStream;
 
 /**
  * AbstractSingleThreadStateMachine
@@ -36,10 +39,22 @@ public abstract class AbstractSingleThreadStateMachine implements StateMachine {
         applyCommand(commandBytes);
         this.lastApplied = index;
 
-        // TODO 快照
+        // 快照
+        if (shouldGenerateSnapshot(firstLogIndex, index)) {
+            context.generateSnapshot(index);
+        }
     }
 
     protected abstract void applyCommand(@Nonnull byte[] commandBytes);
+
+    @Override
+    public void applySnapshot(@Nonnull Snapshot snapshot) throws IOException {
+        log.info("apply snapshot, last included index {}", snapshot.getLastIncludedIndex());
+        doApplySnapshot(snapshot.getDataStream());
+        lastApplied = snapshot.getLastIncludedIndex();
+    }
+
+    protected abstract void doApplySnapshot(@Nonnull InputStream input) throws IOException;
 
     @Override
     public void shutdown() {
