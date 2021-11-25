@@ -68,3 +68,13 @@ message SnapshotHeader {
   int32 last_term = 2;
   repeated NodeEndpoint last_config = 3;
 }
+
+message AddNodeCommand {
+  repeated NodeEndpoint node_endpoints = 1;
+  NodeEndpoint new_node_endpoint = 2;
+}
+
+message RemoveNodeCommand {
+  repeated NodeEndpoint node_endpoints = 1;
+  string node_to_remove = 2;
+}

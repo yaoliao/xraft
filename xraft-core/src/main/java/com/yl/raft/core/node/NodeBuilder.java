@@ -38,6 +38,7 @@ public class NodeBuilder {
     private Log log;
     private NodeStore store = null;
     private NioEventLoopGroup workerNioEventLoopGroup = null;
+    private TaskExecutor groupConfigChangeTaskExecutor;
 
     private boolean standby;
 
@@ -79,7 +80,7 @@ public class NodeBuilder {
         if (!dataDir.isDirectory() || !dataDir.exists()) {
             throw new IllegalArgumentException("[" + dataDirPath + "] not a directory, or not exists");
         }
-        log = new FileLog(dataDir, eventBus);
+        log = new FileLog(dataDir, eventBus, group.listEndpointOfMajor());
         store = new FileNodeStore(new File(dataDir, FileNodeStore.FILE_NAME));
         return this;
     }
@@ -108,8 +109,10 @@ public class NodeBuilder {
         nodeContext.setTaskExecutor(taskExecutor == null ? new SingleThreadTaskExecutor("node") : taskExecutor);
         nodeContext.setEventBus(eventBus);
         nodeContext.setStore(store == null ? new MemoryNodeStore() : store);
-        nodeContext.setLog(log == null ? new MemoryLog(eventBus) : log);
+        nodeContext.setLog(log == null ? new MemoryLog(eventBus, group.listEndpointOfMajor()) : log);
         nodeContext.setConfig(config);
+        nodeContext.setGroupConfigChangeTaskExecutor(groupConfigChangeTaskExecutor != null ? groupConfigChangeTaskExecutor :
+                new SingleThreadTaskExecutor("group-config-change"));
         return nodeContext;
     }
 

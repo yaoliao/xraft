@@ -1,12 +1,9 @@
 package com.yl.raft.core.log;
 
 import com.google.common.eventbus.EventBus;
-import com.yl.raft.core.log.entry.Entry;
-import com.yl.raft.core.log.entry.EntryMeta;
-import com.yl.raft.core.log.entry.GeneralEntry;
-import com.yl.raft.core.log.entry.NoOpEntry;
-import com.yl.raft.core.log.event.SnapshotGenerateEvent;
+import com.yl.raft.core.log.entry.*;
 import com.yl.raft.core.log.sequence.EntrySequence;
+import com.yl.raft.core.log.sequence.GroupConfigEntryList;
 import com.yl.raft.core.log.snapshot.*;
 import com.yl.raft.core.log.statemachine.StateMachine;
 import com.yl.raft.core.log.statemachine.StateMachineContext;
@@ -32,13 +29,15 @@ public abstract class AbstractLog implements Log {
 
     protected StateMachine stateMachine;
 
-    private final StateMachineContext stateMachineContext = new StateMachineContextImpl();
+    protected StateMachineContext stateMachineContext;
 
     protected Snapshot snapshot;
 
-    protected SnapshotBuilder snapshotBuilder = new NullSnapshotBuilder();
+    protected SnapshotBuilder<? extends Snapshot> snapshotBuilder = new NullSnapshotBuilder();
 
     protected final EventBus eventBus;
+
+    protected GroupConfigEntryList groupConfigEntryList;
 
     AbstractLog(EventBus eventBus) {
         this.eventBus = eventBus;
@@ -122,22 +121,29 @@ public abstract class AbstractLog implements Log {
     }
 
     @Override
-    public boolean appendEntriesFromLeader(int prevLogIndex, int prevLogTerm, List<Entry> leaderEntries) {
+    public AppendEntriesState appendEntriesFromLeader(int prevLogIndex, int prevLogTerm, List<Entry> leaderEntries) {
 
         if (!checkIfPreviousLogMatches(prevLogIndex, prevLogTerm)) {
-            return false;
+            return AppendEntriesState.FAILED;
         }
 
         if (leaderEntries.isEmpty()) {
-            return true;
+            return AppendEntriesState.SUCCESS;
         }
 
         // 解决冲突的日志，并返回需要追加的日志
         // 因为 prevLogIndex 不一定是最后的一条日志，所以要把 preLogIndex 之后的日志都删除
-        EntrySequenceView newEntries = removeUnmatchedLog(new EntrySequenceView(leaderEntries));
+        UnmatchedLogRemovedResult unmatchedLogRemovedResult = removeUnmatchedLog(new EntrySequenceView(leaderEntries));
         // 添加新的日志
-        appendEntriesFromLeader(newEntries);
-        return true;
+        GroupConfigEntry lastGroupConfigEntry = appendEntriesFromLeader(unmatchedLogRemovedResult.newEntries);
+
+        // lastGroupConfigEntry != null 表示有新的集群配置日志，则应用新的
+        // unmatchedLogRemovedResult.getGroup() ：如果没有新的集群配置的日志，那么看移除的日志中是否有集群配置日志，如果有，就还原到该日志应用前的集群配置状态
+        return new AppendEntriesState(
+                lastGroupConfigEntry != null ?
+                        lastGroupConfigEntry.getResultNodeEndpoints() :
+                        unmatchedLogRemovedResult.getGroup()
+        );
     }
 
     @Override
@@ -232,6 +238,26 @@ public abstract class AbstractLog implements Log {
         return rpc;
     }
 
+    @Override
+    public Set<NodeEndpoint> getLastGroup() {
+        return groupConfigEntryList.getLastGroup();
+    }
+
+    @Override
+    public AddNodeEntry appendEntryForAddNode(int term, Set<NodeEndpoint> nodeEndpoints, NodeEndpoint newNodeEndpoint) {
+        AddNodeEntry entry = new AddNodeEntry(entrySequence.getNextLogIndex(), term, nodeEndpoints, newNodeEndpoint);
+        entrySequence.append(entry);
+        groupConfigEntryList.add(entry);
+        return entry;
+    }
+
+    @Override
+    public RemoveNodeEntry appendEntryForRemoveNode(int term, Set<NodeEndpoint> nodeEndpoints, NodeId nodeToRemove) {
+        RemoveNodeEntry entry = new RemoveNodeEntry(entrySequence.getNextLogIndex(), term, nodeEndpoints, nodeToRemove);
+        entrySequence.append(entry);
+        groupConfigEntryList.add(entry);
+        return entry;
+    }
 
     @Override
     public void close() {
@@ -244,7 +270,10 @@ public abstract class AbstractLog implements Log {
     private void applyEntry(Entry entry) {
         // skip no-op entry and membership-change entry
         if (isApplicable(entry)) {
-            stateMachine.applyLog(stateMachineContext, entry.getIndex(), entry.getCommandBytes(), entrySequence.getFirstLogIndex());
+            Set<NodeEndpoint> lastGroup = groupConfigEntryList.getLastGroupBeforeOrDefault(entry.getIndex());
+            stateMachine.applyLog(stateMachineContext, entry.getIndex(), entry.getTerm(), entry.getCommandBytes(), entrySequence.getFirstLogIndex(), lastGroup);
+        } else {
+            stateMachine.advanceLastApplied(entry.getIndex());
         }
     }
 
@@ -264,33 +293,39 @@ public abstract class AbstractLog implements Log {
         return entry.getTerm() == currentTerm;
     }
 
-    private void appendEntriesFromLeader(EntrySequenceView newEntries) {
-        if (newEntries.isEmpty()) {
-            return;
+    private GroupConfigEntry appendEntriesFromLeader(EntrySequenceView leaderEntries) {
+        if (leaderEntries.isEmpty()) {
+            return null;
         }
-        log.debug("append entries from leader from {} to {}", newEntries.getFirstLogIndex(), newEntries.getLastLogIndex());
-        for (Entry newEntry : newEntries) {
-            entrySequence.append(newEntry);
+        log.debug("append entries from leader from {} to {}", leaderEntries.getFirstLogIndex(), leaderEntries.getLastLogIndex());
+        GroupConfigEntry lastGroupConfigEntry = null;
+        for (Entry leaderEntry : leaderEntries) {
+            entrySequence.append(leaderEntry);
+            if (leaderEntry instanceof GroupConfigEntry) {
+                lastGroupConfigEntry = (GroupConfigEntry) leaderEntry;
+            }
         }
+        return lastGroupConfigEntry;
     }
 
-    private EntrySequenceView removeUnmatchedLog(EntrySequenceView leaderEntries) {
+    private UnmatchedLogRemovedResult removeUnmatchedLog(EntrySequenceView leaderEntries) {
         assert !leaderEntries.isEmpty();
         int firstUnmatched = findFirstUnmatchedLog(leaderEntries);
-
         if (firstUnmatched < 0) {
-            return new EntrySequenceView(Collections.emptyList());
+            return new UnmatchedLogRemovedResult(EntrySequenceView.EMPTY, null);
         }
+
         // 移除不匹配的所有的日志
-        removeEntriesAfter(firstUnmatched - 1);
+        GroupConfigEntry firstRemovedEntry = removeEntriesAfter(firstUnmatched - 1);
+
         // 返回需要追加的日志
-        return leaderEntries.subView(firstUnmatched);
+        return new UnmatchedLogRemovedResult(leaderEntries.subView(firstUnmatched), firstRemovedEntry);
     }
 
-    private void removeEntriesAfter(int index) {
+    private GroupConfigEntry removeEntriesAfter(int index) {
         //  在 checkIfPreviousLogMatches 方法已经对日志快照做了判断，这里不需要判断快照的情况了
         if (entrySequence.isEmpty() || index >= entrySequence.getLastLogIndex()) {
-            return;
+            return null;
         }
         int lastApplied = stateMachine.getLastApplied();
         if (index < lastApplied && entrySequence.subList(index + 1, lastApplied + 1).stream().anyMatch(this::isApplicable)) {
@@ -304,7 +339,9 @@ public abstract class AbstractLog implements Log {
         if (index < commitIndex) {
             commitIndex = index;
         }
+        return groupConfigEntryList.removeAfter(index);
     }
+
 
     private int findFirstUnmatchedLog(EntrySequenceView leaderEntries) {
         for (Entry leaderEntry : leaderEntries) {
@@ -361,12 +398,18 @@ public abstract class AbstractLog implements Log {
 
     protected abstract void replaceSnapshot(Snapshot newSnapshot);
 
-    protected abstract SnapshotBuilder newSnapshotBuilder(InstallSnapshotRpc firstRpc);
+    protected abstract SnapshotBuilder<? extends Snapshot> newSnapshotBuilder(InstallSnapshotRpc firstRpc);
 
     protected abstract Snapshot generateSnapshot(EntryMeta lastAppliedEntryMeta, Set<NodeEndpoint> groupConfig);
 
+    void setStateMachineContext(StateMachineContext stateMachineContext) {
+        this.stateMachineContext = stateMachineContext;
+    }
+
     @Getter
     private static class EntrySequenceView implements Iterable<Entry> {
+
+        static final EntrySequenceView EMPTY = new EntrySequenceView(Collections.emptyList());
 
         private final List<Entry> entries;
         private int firstLogIndex = -1;
@@ -404,12 +447,19 @@ public abstract class AbstractLog implements Log {
         }
     }
 
-    private class StateMachineContextImpl implements StateMachineContext {
+    private static class UnmatchedLogRemovedResult {
+        private final EntrySequenceView newEntries;
+        private final GroupConfigEntry firstRemovedEntry;
 
-        // 快照
-        @Override
-        public void generateSnapshot(int lastIncludedIndex) {
-            eventBus.post(new SnapshotGenerateEvent(lastIncludedIndex));
+        UnmatchedLogRemovedResult(EntrySequenceView newEntries, GroupConfigEntry firstRemovedEntry) {
+            this.newEntries = newEntries;
+            this.firstRemovedEntry = firstRemovedEntry;
+        }
+
+        Set<NodeEndpoint> getGroup() {
+            // 这个 getNodeEndpoints 方法，获取的是操作前配置
+            return firstRemovedEntry != null ? firstRemovedEntry.getNodeEndpoints() : null;
         }
     }
+
 }

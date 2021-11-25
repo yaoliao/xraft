@@ -27,11 +27,18 @@ public class FollowerNodeRole extends AbstractNodeRole {
      */
     private final ElectionTimeout electionTimeout;
 
-    public FollowerNodeRole(int term, NodeId votedFor, NodeId leaderId, ElectionTimeout electionTimeout) {
+    /**
+     * 最后的从 leader 收到的心跳时间
+     */
+    private final long lastHeartbeat;
+
+
+    public FollowerNodeRole(int term, NodeId votedFor, NodeId leaderId, long lastHeartbeat, ElectionTimeout electionTimeout) {
         super(RoleName.FOLLOWER, term);
         this.votedFor = votedFor;
         this.leaderId = leaderId;
         this.electionTimeout = electionTimeout;
+        this.lastHeartbeat = lastHeartbeat;
     }
 
     @Override

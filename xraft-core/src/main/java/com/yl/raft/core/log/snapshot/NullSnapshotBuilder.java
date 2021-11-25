@@ -5,7 +5,7 @@ import com.yl.raft.core.rpc.message.InstallSnapshotRpc;
 /**
  * NullSnapshotBuilder
  */
-public class NullSnapshotBuilder implements SnapshotBuilder {
+public class NullSnapshotBuilder implements SnapshotBuilder<Snapshot> {
 
     @Override
     public void append(InstallSnapshotRpc rpc) {

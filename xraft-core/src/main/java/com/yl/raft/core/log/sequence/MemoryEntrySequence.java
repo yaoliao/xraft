@@ -1,11 +1,14 @@
 package com.yl.raft.core.log.sequence;
 
 import com.yl.raft.core.log.entry.Entry;
+import com.yl.raft.core.log.entry.GroupConfigEntry;
+import com.yl.raft.core.node.NodeEndpoint;
 import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * MemoryEntrySequence
@@ -62,6 +65,17 @@ public class MemoryEntrySequence extends AbstractEntrySequence {
     @Override
     public int getCommitIndex() {
         return commitIndex;
+    }
+
+    @Override
+    public GroupConfigEntryList buildGroupConfigEntryList(Set<NodeEndpoint> initialGroup) {
+        GroupConfigEntryList list = new GroupConfigEntryList(initialGroup);
+        for (Entry entry : entries) {
+            if (entry instanceof GroupConfigEntry) {
+                list.add((GroupConfigEntry) entry);
+            }
+        }
+        return list;
     }
 
     @Override

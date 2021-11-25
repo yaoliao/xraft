@@ -59,4 +59,6 @@ public class NodeContext {
 
     private EventBus eventBus;
 
+    private TaskExecutor groupConfigChangeTaskExecutor;
+
 }

@@ -57,6 +57,7 @@ public class NodeGroup {
     Set<NodeEndpoint> listEndpointOfMajorExceptSelf() {
         Set<NodeEndpoint> endpoints = new HashSet<>();
         for (GroupMember member : memberMap.values()) {
+            if (!member.isMajor()) continue;
             if (!member.getEndpoint().getId().equals(selfId)) {
                 endpoints.add(member.getEndpoint());
             }
@@ -67,9 +68,9 @@ public class NodeGroup {
     Set<NodeEndpoint> listEndpointOfMajor() {
         Set<NodeEndpoint> endpoints = new HashSet<>();
         for (GroupMember member : memberMap.values()) {
-//            if (member.isMajor()) {
+            if (member.isMajor()) {
                 endpoints.add(member.getEndpoint());
-//            }
+            }
         }
         return endpoints;
     }
@@ -104,9 +105,6 @@ public class NodeGroup {
         return memberMap.keySet().size();
     }
 
-    /**
-     * 获取过半的 follower 的 matchIndex
-     */
     int getMatchIndex() {
         List<NodeMatchIndex> matchIndices = new ArrayList<>();
         for (GroupMember member : memberMap.values()) {
@@ -123,6 +121,33 @@ public class NodeGroup {
         return matchIndices.get(count / 2).getMatchIndex();
     }
 
+    /**
+     * 获取过半的 follower 的 matchIndex
+     */
+    int getMatchIndexOfMajor() {
+        List<NodeMatchIndex> matchIndices = new ArrayList<>();
+        for (GroupMember member : memberMap.values()) {
+            if (member.isMajor()) {
+                if (member.idEquals(selfId)) {
+                    matchIndices.add(new NodeMatchIndex(selfId));
+                } else {
+                    matchIndices.add(new NodeMatchIndex(member.getId(), member.getMatchIndex()));
+                }
+            }
+        }
+        int count = matchIndices.size();
+        if (count == 0) {
+            throw new IllegalStateException("no major node");
+        }
+        if (count == 1 && matchIndices.get(0).nodeId == selfId) {
+            throw new IllegalStateException("standalone");
+        }
+        Collections.sort(matchIndices);
+        log.debug("match indices {}", matchIndices);
+        int index = (count % 2 == 0 ? count / 2 - 1 : count / 2);
+        return matchIndices.get(index).getMatchIndex();
+    }
+
     boolean isStandalone() {
         return memberMap.size() == 1 && memberMap.containsKey(selfId);
     }
@@ -131,19 +156,51 @@ public class NodeGroup {
         return memberMap.get(selfId);
     }
 
+    int getCountOfMajor() {
+        return (int) memberMap.values().stream().filter(GroupMember::isMajor).count();
+    }
+
+    GroupMember addNode(NodeEndpoint endpoint, int nextIndex, int matchIndex, boolean major) {
+        log.info("add node {} to group", endpoint.getId());
+        ReplicatingState replicatingState = new ReplicatingState(nextIndex, matchIndex);
+        GroupMember member = new GroupMember(endpoint, replicatingState, major);
+        memberMap.put(endpoint.getId(), member);
+        return member;
+    }
+
+    void updateNodes(Set<NodeEndpoint> endpoints) {
+        memberMap = buildMemberMap(endpoints);
+        log.info("group config changed -> {}", memberMap.keySet());
+    }
+
+    void removeNode(NodeId id) {
+        log.info("node {} removed", id);
+        memberMap.remove(id);
+    }
+
     /**
      * Node match index.
      *
-     * @see NodeGroup#getMatchIndex()
+     * @see NodeGroup#getMatchIndexOfMajor()
      */
     private static class NodeMatchIndex implements Comparable<NodeMatchIndex> {
 
         private final NodeId nodeId;
         private final int matchIndex;
+        private final boolean leader;
+
+        NodeMatchIndex(NodeId nodeId) {
+            this(nodeId, Integer.MAX_VALUE, true);
+        }
 
         NodeMatchIndex(NodeId nodeId, int matchIndex) {
+            this(nodeId, matchIndex, false);
+        }
+
+        private NodeMatchIndex(NodeId nodeId, int matchIndex, boolean leader) {
             this.nodeId = nodeId;
             this.matchIndex = matchIndex;
+            this.leader = leader;
         }
 
         int getMatchIndex() {
@@ -152,12 +209,12 @@ public class NodeGroup {
 
         @Override
         public int compareTo(@Nonnull NodeMatchIndex o) {
-            return -Integer.compare(o.matchIndex, this.matchIndex);
+            return Integer.compare(this.matchIndex, o.matchIndex);
         }
 
         @Override
         public String toString() {
-            return "<" + nodeId + ", " + matchIndex + ">";
+            return "<" + nodeId + ", " + (leader ? "L" : matchIndex) + ">";
         }
 
     }

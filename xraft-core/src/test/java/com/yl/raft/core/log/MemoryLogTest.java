@@ -40,7 +40,7 @@ public class MemoryLogTest {
                 new NoOpEntry(2, 1),
                 new NoOpEntry(3, 2)
         );
-        Assert.assertTrue(log.appendEntriesFromLeader(1, 1, leaderEntries));
+        Assert.assertTrue(log.appendEntriesFromLeader(1, 1, leaderEntries).isSuccess());
         Assert.assertEquals(4, log.getNextIndex());
     }
 
@@ -56,7 +56,7 @@ public class MemoryLogTest {
                 new NoOpEntry(2, 2),
                 new NoOpEntry(3, 2)
         );
-        Assert.assertTrue(log.appendEntriesFromLeader(1, 1, leaderEntries));
+        Assert.assertTrue(log.appendEntriesFromLeader(1, 1, leaderEntries).isSuccess());
         Assert.assertEquals(2, log.entrySequence.getEntryMeta(2).getTerm());
         Assert.assertEquals(4, log.getNextIndex());
     }

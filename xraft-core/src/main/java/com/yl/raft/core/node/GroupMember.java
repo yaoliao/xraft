@@ -11,13 +11,25 @@ public class GroupMember {
     private final NodeEndpoint endpoint;
     private ReplicatingState replicatingState;
 
-    public GroupMember(NodeEndpoint endpoint) {
-        this(endpoint, null);
+    /**
+     * 非 major 对象不参与 commitIndex 计算和选举
+     */
+    private boolean major;
+
+    /**
+     * 普通节点
+     */
+    GroupMember(NodeEndpoint endpoint) {
+        this(endpoint, null, true);
     }
 
-    public GroupMember(NodeEndpoint endpoint, ReplicatingState replicatingState) {
+    /**
+     * 新节点
+     */
+    GroupMember(NodeEndpoint endpoint, ReplicatingState replicatingState, boolean major) {
         this.endpoint = endpoint;
         this.replicatingState = replicatingState;
+        this.major = major;
     }
 
     NodeId getId() {

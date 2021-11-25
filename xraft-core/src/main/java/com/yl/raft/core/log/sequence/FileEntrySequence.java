@@ -5,11 +5,14 @@ import com.yl.raft.core.log.LogException;
 import com.yl.raft.core.log.entry.Entry;
 import com.yl.raft.core.log.entry.EntryFactory;
 import com.yl.raft.core.log.entry.EntryMeta;
+import com.yl.raft.core.log.entry.GroupConfigEntry;
+import com.yl.raft.core.node.NodeEndpoint;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * FileEntrySequence
@@ -211,6 +214,32 @@ public class FileEntrySequence extends AbstractEntrySequence {
         } catch (IOException e) {
             throw new LogException("failed to close", e);
         }
+    }
+
+    @Override
+    public GroupConfigEntryList buildGroupConfigEntryList(Set<NodeEndpoint> initialGroup) {
+        GroupConfigEntryList list = new GroupConfigEntryList(initialGroup);
+
+        // check file
+        try {
+            int entryKind;
+            for (EntryIndexItem indexItem : entryIndexFile) {
+                entryKind = indexItem.getKind();
+                if (entryKind == Entry.KIND_ADD_NODE || entryKind == Entry.KIND_REMOVE_NODE) {
+                    list.add((GroupConfigEntry) entriesFile.loadEntry(indexItem.getOffset(), entryFactory));
+                }
+            }
+        } catch (IOException e) {
+            throw new LogException("failed to load entry", e);
+        }
+
+        // check pending entries
+        for (Entry entry : pendingEntries) {
+            if (entry instanceof GroupConfigEntry) {
+                list.add((GroupConfigEntry) entry);
+            }
+        }
+        return list;
     }
 
     private Entry getEntryInFile(int index) {

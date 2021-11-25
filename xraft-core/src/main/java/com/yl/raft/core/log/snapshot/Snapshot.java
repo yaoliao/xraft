@@ -21,6 +21,9 @@ public interface Snapshot {
      */
     int getLastIncludedTerm();
 
+    /**
+     * 集群配置（快照最后一条日志之前的最新集群配置，而不是快照时的系统集群配置）
+     */
     @Nonnull
     Set<NodeEndpoint> getLastConfig();
 

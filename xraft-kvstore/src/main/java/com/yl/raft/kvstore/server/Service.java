@@ -5,6 +5,7 @@ import com.yl.raft.core.log.statemachine.AbstractSingleThreadStateMachine;
 import com.yl.raft.core.node.Node;
 import com.yl.raft.core.node.role.RoleName;
 import com.yl.raft.core.node.role.RoleNameAndLeaderId;
+import com.yl.raft.core.node.task.GroupConfigChangeTaskReference;
 import com.yl.raft.kvstore.Protos;
 import com.yl.raft.kvstore.message.*;
 import lombok.extern.slf4j.Slf4j;
@@ -16,6 +17,7 @@ import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Service
@@ -58,6 +60,55 @@ public class Service {
         log.debug("get {}", key);
         byte[] bytes = map.get(key);
         commandRequest.reply(new GetCommandResponse(bytes));
+    }
+
+    /**
+     * 添加节点
+     */
+    public void addNode(CommandRequest<AddNodeCommand> commandRequest) {
+        Redirect redirect = checkLeadership();
+        if (redirect != null) {
+            commandRequest.reply(redirect);
+            return;
+        }
+
+        AddNodeCommand command = commandRequest.getCommand();
+        GroupConfigChangeTaskReference taskReference = this.node.addNode(command.toNodeEndpoint());
+        awaitResult(taskReference, commandRequest);
+    }
+
+    /**
+     * 移除节点
+     */
+    public void removeNode(CommandRequest<RemoveNodeCommand> commandRequest) {
+        Redirect redirect = checkLeadership();
+        if (redirect != null) {
+            commandRequest.reply(redirect);
+            return;
+        }
+
+        RemoveNodeCommand command = commandRequest.getCommand();
+        GroupConfigChangeTaskReference taskReference = node.removeNode(command.getNodeId());
+        awaitResult(taskReference, commandRequest);
+    }
+
+    private <T> void awaitResult(GroupConfigChangeTaskReference taskReference, CommandRequest<T> commandRequest) {
+        try {
+            switch (taskReference.getResult(3000L)) {
+                case OK:
+                    commandRequest.reply(Success.INSTANCE);
+                    break;
+                case TIMEOUT:
+                    commandRequest.reply(new Failure(101, "timeout"));
+                    break;
+                default:
+                    commandRequest.reply(new Failure(100, "error"));
+            }
+        } catch (TimeoutException e) {
+            commandRequest.reply(new Failure(101, "timeout"));
+        } catch (InterruptedException ignored) {
+            commandRequest.reply(new Failure(100, "error"));
+        }
     }
 
     /**

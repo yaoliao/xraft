@@ -3,13 +3,16 @@ package com.yl.raft.core.log;
 import com.google.common.eventbus.EventBus;
 import com.yl.raft.core.log.entry.Entry;
 import com.yl.raft.core.log.entry.EntryMeta;
+import com.yl.raft.core.log.event.SnapshotGeneratedEvent;
 import com.yl.raft.core.log.sequence.FileEntrySequence;
 import com.yl.raft.core.log.snapshot.*;
+import com.yl.raft.core.log.statemachine.StateMachineContext;
 import com.yl.raft.core.node.NodeEndpoint;
 import com.yl.raft.core.rpc.message.InstallSnapshotRpc;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.List;
 import java.util.Set;
 
@@ -20,19 +23,36 @@ public class FileLog extends AbstractLog {
 
     private final RootDir rootDir;
 
-    public FileLog(File baseDir, EventBus eventBus) {
+    public FileLog(File baseDir, EventBus eventBus, Set<NodeEndpoint> baseGroup) {
         super(eventBus);
+        setStateMachineContext(new StateMachineContextImpl());
         rootDir = new RootDir(baseDir);
 
         LogGeneration latestGeneration = rootDir.getLatestGeneration();
         snapshot = new EmptySnapshot();
 
         if (latestGeneration != null) {
-            entrySequence = new FileEntrySequence(latestGeneration, latestGeneration.getLastIncludedIndex());
+            Set<NodeEndpoint> initialGroup = baseGroup;
+            if (latestGeneration.getSnapshotFile().exists()) {
+                snapshot = new FileSnapshot(latestGeneration);
+                initialGroup = snapshot.getLastConfig();
+            }
+            FileEntrySequence fileEntrySequence = new FileEntrySequence(latestGeneration, snapshot.getLastIncludedIndex() + 1);
+            commitIndex = fileEntrySequence.getCommitIndex();
+            entrySequence = fileEntrySequence;
+            groupConfigEntryList = entrySequence.buildGroupConfigEntryList(initialGroup);
         } else {
             LogGeneration firstGeneration = rootDir.createFirstGeneration();
             entrySequence = new FileEntrySequence(firstGeneration, 1);
         }
+    }
+
+    @Override
+    public void snapshotGenerated(int lastIncludedIndex) {
+        if (lastIncludedIndex <= snapshot.getLastIncludedIndex()) {
+            return;
+        }
+        replaceSnapshot(new FileSnapshot(rootDir.getLogDirForGenerating()));
     }
 
     @Override
@@ -56,8 +76,8 @@ public class FileLog extends AbstractLog {
         LogDir generation = rootDir.rename(fileSnapshot.getLogDir(), lastIncludedIndex);
         snapshot = new FileSnapshot(generation);
         entrySequence = new FileEntrySequence(generation, logIndexOffset);
-        //entrySequence.buildGroupConfigEntryList();
         commitIndex = entrySequence.getCommitIndex();
+        groupConfigEntryList = entrySequence.buildGroupConfigEntryList(snapshot.getLastConfig());
     }
 
     @Override
@@ -75,5 +95,31 @@ public class FileLog extends AbstractLog {
             throw new LogException("failed to generate snapshot", e);
         }
         return new FileSnapshot(logDir);
+    }
+
+    private class StateMachineContextImpl implements StateMachineContext {
+
+        private FileSnapshotWriter snapshotWriter = null;
+
+        @Override
+        public void generateSnapshot(int lastIncludedIndex) {
+            throw new UnsupportedOperationException();
+        }
+
+        public OutputStream getOutputForGeneratingSnapshot(int lastIncludedIndex, int lastIncludedTerm, Set<NodeEndpoint> groupConfig) throws Exception {
+            if (snapshotWriter != null) {
+                snapshotWriter.close();
+            }
+            snapshotWriter = new FileSnapshotWriter(rootDir.getLogDirForGenerating().getSnapshotFile(), lastIncludedIndex, lastIncludedTerm, groupConfig);
+            return snapshotWriter.getOutput();
+        }
+
+        public void doneGeneratingSnapshot(int lastIncludedIndex) throws Exception {
+            if (snapshotWriter == null) {
+                throw new IllegalStateException("snapshot not created");
+            }
+            snapshotWriter.close();
+            eventBus.post(new SnapshotGeneratedEvent(lastIncludedIndex));
+        }
     }
 }

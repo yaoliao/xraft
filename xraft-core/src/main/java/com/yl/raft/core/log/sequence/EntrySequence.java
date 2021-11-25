@@ -2,8 +2,10 @@ package com.yl.raft.core.log.sequence;
 
 import com.yl.raft.core.log.entry.Entry;
 import com.yl.raft.core.log.entry.EntryMeta;
+import com.yl.raft.core.node.NodeEndpoint;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * EntrySequence
@@ -40,6 +42,8 @@ public interface EntrySequence {
     int getCommitIndex();
 
     void removeAfter(int index);
+
+    GroupConfigEntryList buildGroupConfigEntryList(Set<NodeEndpoint> initialGroup);
 
     void close();
 

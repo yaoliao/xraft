@@ -1,6 +1,7 @@
 package com.yl.raft.core.log.statemachine;
 
 import com.yl.raft.core.log.snapshot.Snapshot;
+import com.yl.raft.core.node.NodeEndpoint;
 import com.yl.raft.core.support.SingleThreadTaskExecutor;
 import com.yl.raft.core.support.TaskExecutor;
 import lombok.extern.slf4j.Slf4j;
@@ -8,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.Set;
 
 /**
  * AbstractSingleThreadStateMachine
@@ -28,20 +31,36 @@ public abstract class AbstractSingleThreadStateMachine implements StateMachine {
     }
 
     @Override
-    public void applyLog(StateMachineContext context, int index, byte[] commandBytes, int firstLogIndex) {
-        this.taskExecutor.submit(() -> doApplyLog(context, index, commandBytes, firstLogIndex));
+    public void applyLog(StateMachineContext context, int index, int term, @Nonnull byte[] commandBytes, int firstLogIndex, Set<NodeEndpoint> lastGroupConfig) {
+        taskExecutor.submit(() -> doApplyLog(context, index, term, commandBytes, firstLogIndex, lastGroupConfig));
     }
 
-    private void doApplyLog(StateMachineContext context, int index, byte[] commandBytes, int firstLogIndex) {
+    @Override
+    public void advanceLastApplied(int index) {
+        taskExecutor.submit(() -> {
+            if (index <= lastApplied) {
+                return;
+            }
+            lastApplied = index;
+        });
+    }
+
+    private void doApplyLog(StateMachineContext context, int index, int term, @Nonnull byte[] commandBytes, int firstLogIndex, Set<NodeEndpoint> lastGroupConfig) {
         if (index <= lastApplied) {
             return;
         }
+        log.debug("apply log {}", index);
         applyCommand(commandBytes);
-        this.lastApplied = index;
-
-        // 快照
-        if (shouldGenerateSnapshot(firstLogIndex, index)) {
-            context.generateSnapshot(index);
+        lastApplied = index;
+        if (!shouldGenerateSnapshot(firstLogIndex, index)) {
+            return;
+        }
+        try {
+            OutputStream output = context.getOutputForGeneratingSnapshot(index, term, lastGroupConfig);
+            generateSnapshot(output);
+            context.doneGeneratingSnapshot(index);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 

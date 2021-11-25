@@ -1,9 +1,6 @@
 package com.yl.raft.core.log;
 
-import com.yl.raft.core.log.entry.Entry;
-import com.yl.raft.core.log.entry.EntryMeta;
-import com.yl.raft.core.log.entry.GeneralEntry;
-import com.yl.raft.core.log.entry.NoOpEntry;
+import com.yl.raft.core.log.entry.*;
 import com.yl.raft.core.log.statemachine.StateMachine;
 import com.yl.raft.core.node.NodeEndpoint;
 import com.yl.raft.core.node.NodeId;
@@ -55,7 +52,7 @@ public interface Log {
     /**
      * 追加来自 leader 的日志条目
      */
-    boolean appendEntriesFromLeader(int prevLogIndex, int prevLogTerm, List<Entry> entries);
+    AppendEntriesState appendEntriesFromLeader(int prevLogIndex, int prevLogTerm, List<Entry> entries);
 
     /**
      * 推进 commitIndex
@@ -83,6 +80,8 @@ public interface Log {
      */
     void generateSnapshot(int lastIncludedIndex, Set<NodeEndpoint> groupConfig);
 
+    void snapshotGenerated(int lastIncludedIndex);
+
     /**
      * Create install snapshot rpc from log.
      *
@@ -93,6 +92,18 @@ public interface Log {
      * @return install snapshot rpc
      */
     InstallSnapshotRpc createInstallSnapshotRpc(int term, NodeId selfId, int offset, int length);
+
+    Set<NodeEndpoint> getLastGroup();
+
+    /**
+     * 添加一个 addNode 的日志条目
+     */
+    AddNodeEntry appendEntryForAddNode(int term, Set<NodeEndpoint> nodeEndpoints, NodeEndpoint newNodeEndpoint);
+
+    /**
+     * 添加一个 removeNode 的日志条目
+     */
+    RemoveNodeEntry appendEntryForRemoveNode(int term, Set<NodeEndpoint> nodeEndpoints, NodeId nodeToRemove);
 
     /**
      * 关闭

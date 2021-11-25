@@ -1,12 +1,18 @@
 package com.yl.raft.core.node;
 
 import com.google.common.eventbus.Subscribe;
+import com.yl.raft.core.log.AppendEntriesState;
+import com.yl.raft.core.log.InstallSnapshotState;
+import com.yl.raft.core.log.entry.AddNodeEntry;
 import com.yl.raft.core.log.entry.EntryMeta;
+import com.yl.raft.core.log.entry.RemoveNodeEntry;
 import com.yl.raft.core.log.event.SnapshotGenerateEvent;
+import com.yl.raft.core.log.event.SnapshotGeneratedEvent;
 import com.yl.raft.core.log.snapshot.EntryInSnapshotException;
 import com.yl.raft.core.log.statemachine.StateMachine;
 import com.yl.raft.core.node.role.*;
 import com.yl.raft.core.node.store.NodeStore;
+import com.yl.raft.core.node.task.*;
 import com.yl.raft.core.rpc.message.*;
 import com.yl.raft.core.schedule.ElectionTimeout;
 import com.yl.raft.core.schedule.LogReplicationTask;
@@ -14,7 +20,11 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 
 /**
  * NodeImpl
@@ -26,6 +36,14 @@ public class NodeImpl implements Node {
     private final NodeContext context;
     private volatile boolean started;
     private AbstractNodeRole role;
+
+    private final NewNodeCatchUpTaskGroup newNodeCatchUpTaskGroup = new NewNodeCatchUpTaskGroup();
+    private final NewNodeCatchUpTaskContext newNodeCatchUpTaskContext = new NewNodeCatchUpTaskContextImpl();
+    private volatile GroupConfigChangeTaskReference currentGroupConfigChangeTaskReference
+            = new FixedResultGroupConfigTaskReference(GroupConfigChangeTaskResult.OK);
+    private volatile GroupConfigChangeTask currentGroupConfigChangeTask = GroupConfigChangeTask.NONE;
+    private final GroupConfigChangeTaskContext groupConfigChangeTaskContext = new GroupConfigChangeTaskContextImpl();
+
 
     public NodeImpl(NodeContext context) {
         this.context = context;
@@ -44,11 +62,15 @@ public class NodeImpl implements Node {
         // 初始化 rpc 连接
         context.getConnector().initialize();
 
+        // 应用最新集群配置
+        Set<NodeEndpoint> lastGroup = context.getLog().getLastGroup();
+        context.getGroup().updateNodes(lastGroup);
+
         // 启动的时候节点是 Follower 角色
         // 1、将持久化的任期和投票信息重新赋值 2、启动选举超时定时器
         NodeStore store = context.getStore();
         FollowerNodeRole nodeRole = new FollowerNodeRole(store.getTerm(), store.getVotedFor(),
-                null, scheduleElectionTimeout());
+                null, 0, scheduleElectionTimeout());
         changeToRole(nodeRole);
 
         started = true;
@@ -73,6 +95,97 @@ public class NodeImpl implements Node {
     @Override
     public RoleNameAndLeaderId getRoleNameAndLeaderId() {
         return role.getNameAndLeaderId(context.getSelfId());
+    }
+
+    @Nonnull
+    @Override
+    public GroupConfigChangeTaskReference addNode(@Nonnull NodeEndpoint endpoint) {
+        Objects.requireNonNull(endpoint);
+        ensureLeader();
+
+        if (context.getSelfId().equals(endpoint.getId())) {
+            throw new IllegalArgumentException("new node cannot be self");
+        }
+
+        NewNodeCatchUpTask newNodeCatchUpTask = new NewNodeCatchUpTask(newNodeCatchUpTaskContext, endpoint, context.getConfig());
+
+        if (!newNodeCatchUpTaskGroup.add(newNodeCatchUpTask)) {
+            throw new IllegalArgumentException("node " + endpoint.getId() + " is adding");
+        }
+
+        NewNodeCatchUpTaskResult taskResult;
+        try {
+            // 开始向新加入的节点复制日志，该方法一直阻塞，直到复制完成或者超时为止
+            taskResult = newNodeCatchUpTask.call();
+            switch (taskResult.getState()) {
+                case TIMEOUT:
+                    return new FixedResultGroupConfigTaskReference(GroupConfigChangeTaskResult.TIMEOUT);
+                case REPLICATION_FAILED:
+                    new FixedResultGroupConfigTaskReference(GroupConfigChangeTaskResult.REPLICATION_FAILED);
+            }
+        } catch (Exception e) {
+            if (!(e instanceof InterruptedException)) {
+                log.warn("failed to catch up new node " + endpoint.getId(), e);
+            }
+            return new FixedResultGroupConfigTaskReference(GroupConfigChangeTaskResult.ERROR);
+        }
+
+        // 等待上一个任务完成
+        GroupConfigChangeTaskResult result = awaitPreviousGroupConfigChangeTask();
+        if (result != null) {
+            return new FixedResultGroupConfigTaskReference(result);
+        }
+
+        synchronized (this) {
+
+            if (currentGroupConfigChangeTask != GroupConfigChangeTask.NONE) {
+                throw new IllegalStateException("group config change concurrently");
+            }
+            // AddNodeTask 会先添加一个 addNode 的日志条目，并将集群配置应用到本地，接着开始向 follower 节点复制日志，并且该任务开始阻塞，
+            // 直到新添加的那个 addNode 的日志条目被 commit 之后，该任务才从阻塞中被唤醒
+            currentGroupConfigChangeTask = new AddNodeTask(groupConfigChangeTaskContext, endpoint, taskResult);
+            Future<GroupConfigChangeTaskResult> future = context.getGroupConfigChangeTaskExecutor().submit(currentGroupConfigChangeTask);
+            currentGroupConfigChangeTaskReference = new FutureGroupConfigChangeTaskReference(future);
+            return currentGroupConfigChangeTaskReference;
+        }
+    }
+
+    @Nonnull
+    @Override
+    public GroupConfigChangeTaskReference removeNode(@Nonnull NodeId id) {
+        Objects.requireNonNull(id);
+        ensureLeader();
+
+        GroupConfigChangeTaskResult result = awaitPreviousGroupConfigChangeTask();
+        if (result != null) {
+            return new FixedResultGroupConfigTaskReference(result);
+        }
+
+        synchronized (this) {
+            if (currentGroupConfigChangeTask != GroupConfigChangeTask.NONE) {
+                throw new IllegalStateException("group config change concurrently");
+            }
+
+            // 和添加节点时一样，先追加一条 RemoveNodeEntry 的日志，然后将集群配置应用到本地，接着向 follower 开始复制日志，并将该 task 阻塞，
+            // 直到该移除节点的日志被 commit 之后，该任务才从阻塞中返回
+            currentGroupConfigChangeTask = new RemoveNodeTask(groupConfigChangeTaskContext, id, context.getSelfId());
+            Future<GroupConfigChangeTaskResult> future = context.getGroupConfigChangeTaskExecutor().submit(currentGroupConfigChangeTask);
+            currentGroupConfigChangeTaskReference = new FutureGroupConfigChangeTaskReference(future);
+            return currentGroupConfigChangeTaskReference;
+        }
+    }
+
+    @Nullable
+    private GroupConfigChangeTaskResult awaitPreviousGroupConfigChangeTask() {
+        try {
+            currentGroupConfigChangeTaskReference.awaitDone(context.getConfig().getPreviousGroupConfigChangeTimeout());
+            return null;
+        } catch (InterruptedException ignored) {
+            return GroupConfigChangeTaskResult.ERROR;
+        } catch (TimeoutException ignored) {
+            log.info("previous cannot complete within timeout");
+            return GroupConfigChangeTaskResult.TIMEOUT;
+        }
     }
 
     /**
@@ -150,8 +263,13 @@ public class NodeImpl implements Node {
     public void onReceiveRequestVoteRpc(RequestVoteRpcMessage rpcMessage) {
         log.debug("======= 收到投票请求 ========  msg:{}", rpcMessage.getRpc().toString());
         // 切换线程到主处理线程
-        context.getTaskExecutor().submit(() -> context.getConnector().replyRequestVote(doProcessRequestVoteRpc(rpcMessage),
-                context.getGroup().findMember(rpcMessage.getSourceNodeId()).getEndpoint()));
+        context.getTaskExecutor().submit(() -> {
+            RequestVoteResult requestVoteResult = doProcessRequestVoteRpc(rpcMessage);
+            if (requestVoteResult != null) {
+                context.getConnector().replyRequestVote(requestVoteResult,
+                        context.getGroup().findMember(rpcMessage.getSourceNodeId()).getEndpoint());
+            }
+        });
     }
 
     /**
@@ -191,9 +309,20 @@ public class NodeImpl implements Node {
      * 收到开始生成快照的事件，由状态机发出该事件（不管是 leader 还是 follower 都会收到该事件）
      */
     @Subscribe
+    @Deprecated
     public void onGenerateSnapshot(SnapshotGenerateEvent event) {
         context.getTaskExecutor().submit(() -> {
             context.getLog().generateSnapshot(event.getLastIncludedIndex(), context.getGroup().listEndpointOfMajor());
+        });
+    }
+
+    /**
+     * 收到开始生成快照的事件，由状态机发出该事件（不管是 leader 还是 follower 都会收到该事件）
+     */
+    @Subscribe
+    public void onGenerateSnapshot(SnapshotGeneratedEvent event) {
+        context.getTaskExecutor().submit(() -> {
+            context.getLog().snapshotGenerated(event.getLastIncludedIndex());
         });
     }
 
@@ -224,13 +353,18 @@ public class NodeImpl implements Node {
 
         // step down if result's term is larger than current one
         if (result.getTerm() > role.getTerm()) {
-            becomeFollower(result.getTerm(), null, null, true);
+            becomeFollower(result.getTerm(), null, null, 0, true);
             return;
         }
 
         // check role
         if (role.getRoleName() != RoleName.LEADER) {
             log.warn("receive install snapshot result from node {} but current node is not leader, ignore", resultMessage.getSourceNodeId());
+            return;
+        }
+
+        // 判断是否是 catch up 中的节点
+        if (newNodeCatchUpTaskGroup.onReceiveInstallSnapshotResult(resultMessage, context.getLog().getNextIndex())) {
             return;
         }
 
@@ -265,10 +399,15 @@ public class NodeImpl implements Node {
 
         // 对方任期大于自己
         if (rpc.getTerm() > role.getTerm()) {
-            becomeFollower(rpc.getTerm(), null, rpc.getLeaderId(), true);
+            becomeFollower(rpc.getTerm(), null, rpc.getLeaderId(), System.currentTimeMillis(), true);
         }
 
-        context.getLog().installSnapshot(rpc);
+        InstallSnapshotState state = context.getLog().installSnapshot(rpc);
+
+        // 快照安装完成，应用集群配置
+        if (state.getStateName() == InstallSnapshotState.StateName.INSTALLED) {
+            context.getGroup().updateNodes(state.getLastConfig());
+        }
         return new InstallSnapshotResult(role.getTerm(), rpcMessage.getRpc().getMessageId());
     }
 
@@ -282,13 +421,18 @@ public class NodeImpl implements Node {
 
         // 变成 Follower 节点
         if (role.getTerm() < rpc.getTerm()) {
-            becomeFollower(rpc.getTerm(), null, null, true);
+            becomeFollower(rpc.getTerm(), null, null, 0, true);
             return;
         }
 
         // 检查自己的角色
         if (role.getRoleName() != RoleName.LEADER) {
             log.warn("receive append entries result from node {} but current node is not leader, ignore", message.getSourceNodeId());
+            return;
+        }
+
+        // 判断是否是 catch up 的节点返回的信息
+        if (newNodeCatchUpTaskGroup.onReceiveAppendEntriesResult(message, context.getLog().getNextIndex())) {
             return;
         }
 
@@ -303,7 +447,7 @@ public class NodeImpl implements Node {
             // follower 追加日志成功，推进 leader 保存的 matchIndex 和 nextIndex
             if (member.advanceReplicatingState(message.getAppendEntriesRpc().getLastEntryIndex())) {
                 // 推进 leader 的 commitIndex
-                context.getLog().advanceCommitIndex(context.getGroup().getMatchIndex(), role.getTerm());
+                context.getLog().advanceCommitIndex(context.getGroup().getMatchIndexOfMajor(), role.getTerm());
                 log.debug("advance leader commitIndex.  leader commit index: {}", context.getLog().getCommitIndex());
             }
         } else {
@@ -336,18 +480,18 @@ public class NodeImpl implements Node {
 
         // 请求的任期大于自己的，变为 Follower，并追加日志
         if (role.getTerm() < rpc.getTerm()) {
-            becomeFollower(rpc.getTerm(), null, rpc.getLeaderId(), true);
+            becomeFollower(rpc.getTerm(), null, rpc.getLeaderId(), System.currentTimeMillis(), true);
             return new AppendEntriesResult(rpc.getMessageId(), rpc.getTerm(), appendEntries(rpc));
         }
 
         switch (role.getRoleName()) {
             case FOLLOWER:
                 // 重置保存在本地的状态，重置选举超时计时器，并添加日志
-                becomeFollower(role.getTerm(), ((FollowerNodeRole) role).getVotedFor(), rpc.getLeaderId(), true);
+                becomeFollower(role.getTerm(), ((FollowerNodeRole) role).getVotedFor(), rpc.getLeaderId(), System.currentTimeMillis(), true);
                 return new AppendEntriesResult(rpc.getMessageId(), role.getTerm(), appendEntries(rpc));
             case CANDIDATE:
                 // 说明已经选出了 leader 了，退化为 Follower，并添加日志
-                becomeFollower(role.getTerm(), null, rpc.getLeaderId(), true);
+                becomeFollower(role.getTerm(), null, rpc.getLeaderId(), System.currentTimeMillis(), true);
                 return new AppendEntriesResult(rpc.getMessageId(), role.getTerm(), appendEntries(rpc));
             case LEADER:
                 log.warn("receive append entries rpc from another leader {}, ignore", rpc.getLeaderId());
@@ -360,13 +504,17 @@ public class NodeImpl implements Node {
 
     private boolean appendEntries(AppendEntriesRpc rpc) {
         // 追加 leader 日志
-        boolean result = context.getLog().appendEntriesFromLeader(rpc.getPrevLogIndex(), rpc.getPrevLogTerm(), rpc.getEntries());
-        if (result) {
+        AppendEntriesState state = context.getLog().appendEntriesFromLeader(rpc.getPrevLogIndex(), rpc.getPrevLogTerm(), rpc.getEntries());
+        if (state.isSuccess()) {
+            if (state.hasGroup()) {
+                context.getGroup().updateNodes(state.getLatestGroup());
+            }
             // 如果 leaderCommit > commitIndex， 设置本地 commitIndex 为 leaderCommit 和最新日志索引中 较小的一个。
             // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
             context.getLog().advanceCommitIndex(Math.min(rpc.getLeaderCommit(), rpc.getLastEntryIndex()), rpc.getTerm());
+            return true;
         }
-        return result;
+        return false;
     }
 
     /**
@@ -377,6 +525,11 @@ public class NodeImpl implements Node {
      */
     private RequestVoteResult doProcessRequestVoteRpc(RequestVoteRpcMessage requestVoteRpcMessage) {
         RequestVoteRpc requestVoteRpc = requestVoteRpcMessage.getRpc();
+
+        if (role.getRoleName() == RoleName.FOLLOWER &&
+                (System.currentTimeMillis() - ((FollowerNodeRole) role).getLastHeartbeat() < context.getConfig().getMinElectionTimeout())) {
+            return null;
+        }
 
         // 候选人任期小于自己的任期返回 false
         // Reply false if term < currentTerm (§5.1)
@@ -394,7 +547,7 @@ public class NodeImpl implements Node {
         // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
         if (role.getTerm() < requestVoteRpc.getTerm()) {
             // 变成 Follower 重置自己的任期，投票等信息
-            becomeFollower(requestVoteRpc.getTerm(), logAfter ? requestVoteRpc.getCandidateId() : null, null, true);
+            becomeFollower(requestVoteRpc.getTerm(), logAfter ? requestVoteRpc.getCandidateId() : null, null, 0, true);
             return new RequestVoteResult(requestVoteRpc.getTerm(), logAfter);
         }
 
@@ -413,7 +566,7 @@ public class NodeImpl implements Node {
                 if ((votedFor == null && logAfter) || Objects.equals(votedFor, requestVoteRpc.getCandidateId())) {
 
                     // 变成 Follower 重置自己的任期，投票等信息
-                    becomeFollower(role.getTerm(), requestVoteRpc.getCandidateId(), null, true);
+                    becomeFollower(role.getTerm(), requestVoteRpc.getCandidateId(), null, 0, true);
 
                     return new RequestVoteResult(role.getTerm(), true);
                 }
@@ -425,13 +578,13 @@ public class NodeImpl implements Node {
 
     }
 
-    private void becomeFollower(int term, NodeId votedFor, NodeId leaderId, boolean scheduleElectionTimeout) {
+    private void becomeFollower(int term, NodeId votedFor, NodeId leaderId, long lastHeartbeat, boolean scheduleElectionTimeout) {
         role.cancelTimeOutOrTask();
         if (leaderId != null && !leaderId.equals(role.getLeaderId(context.getSelfId()))) {
             log.info("current leader is {}, term {}", leaderId, term);
         }
         ElectionTimeout electionTimeout = scheduleElectionTimeout ? scheduleElectionTimeout() : ElectionTimeout.NONE;
-        FollowerNodeRole followerNodeRole = new FollowerNodeRole(term, votedFor, leaderId, electionTimeout);
+        FollowerNodeRole followerNodeRole = new FollowerNodeRole(term, votedFor, leaderId, lastHeartbeat, electionTimeout);
         changeToRole(followerNodeRole);
     }
 
@@ -444,7 +597,7 @@ public class NodeImpl implements Node {
     private void doProcessRequestVoteResult(RequestVoteResult voteResult) {
         // 任期大于自己则转变为 Follower
         if (role.getTerm() < voteResult.getTerm()) {
-            becomeFollower(voteResult.getTerm(), null, null, true);
+            becomeFollower(voteResult.getTerm(), null, null, 0, true);
             return;
         }
 
@@ -462,7 +615,7 @@ public class NodeImpl implements Node {
         CandidateNodeRole role = (CandidateNodeRole) this.role;
         // 当前获取选票数
         int currentVotesCount = role.getVotesCount() + 1;
-        int count = context.getGroup().getCount();
+        int count = context.getGroup().getCountOfMajor();
         log.debug("votes count {}, major node count {}", currentVotesCount, count);
 
         // 收到选举投票，取消选举超时任务
@@ -568,5 +721,83 @@ public class NodeImpl implements Node {
     }
 
     // =================================
+
+
+    private class NewNodeCatchUpTaskContextImpl implements NewNodeCatchUpTaskContext {
+
+        @Override
+        public void replicateLog(NodeEndpoint endpoint) {
+            context.getTaskExecutor().submit(() -> doReplicateLog(endpoint, context.getLog().getNextIndex()));
+        }
+
+        @Override
+        public void doReplicateLog(NodeEndpoint endpoint, int nextIndex) {
+            try {
+                AppendEntriesRpc appendEntriesRpc = context.getLog().createAppendEntriesRpc(role.getTerm(),
+                        context.getSelfId(), nextIndex, context.getConfig().getMaxReplicationEntriesForNewNode());
+                context.getConnector().sendAppendEntries(appendEntriesRpc, endpoint);
+            } catch (EntryInSnapshotException e) {
+                log.debug("log entry {} in snapshot, replicate with install snapshot RPC", nextIndex);
+
+                InstallSnapshotRpc installSnapshotRpc = context.getLog().createInstallSnapshotRpc(role.getTerm(),
+                        context.getSelfId(), 0, context.getConfig().getSnapshotDataLength());
+                context.getConnector().sendInstallSnapshot(installSnapshotRpc, endpoint);
+            }
+        }
+
+        @Override
+        public void sendInstallSnapshot(NodeEndpoint endpoint, int offset) {
+            InstallSnapshotRpc installSnapshotRpc = context.getLog().createInstallSnapshotRpc(role.getTerm(),
+                    context.getSelfId(), offset, context.getConfig().getSnapshotDataLength());
+            context.getConnector().sendInstallSnapshot(installSnapshotRpc, endpoint);
+        }
+
+        @Override
+        public void done(NewNodeCatchUpTask task) {
+            newNodeCatchUpTaskGroup.remove(task);
+        }
+    }
+
+    private class GroupConfigChangeTaskContextImpl implements GroupConfigChangeTaskContext {
+
+        @Override
+        public void addNode(NodeEndpoint endpoint, int nextIndex, int matchIndex) {
+            context.getTaskExecutor().submit(() -> {
+                Set<NodeEndpoint> nodeEndpoints = context.getGroup().listEndpointOfMajor();
+                AddNodeEntry entry = context.getLog().appendEntryForAddNode(role.getTerm(), nodeEndpoints, endpoint);
+                assert !context.getSelfId().equals(endpoint.getId());
+                context.getGroup().addNode(endpoint, nextIndex, matchIndex, true);
+                currentGroupConfigChangeTask.setGroupConfigEntry(entry);
+                NodeImpl.this.doReplicateLog();
+            });
+        }
+
+        @Override
+        public void downgradeSelf() {
+            // 如果移除的节点是自己，当前节点需要退化为 Follower，但是不需要启动选举超时定时器
+            becomeFollower(role.getTerm(), null, null, 0, false);
+        }
+
+        @Override
+        public void removeNode(NodeId nodeId) {
+            context.getTaskExecutor().submit(() -> {
+                Set<NodeEndpoint> nodeEndpoints = context.getGroup().listEndpointOfMajor();
+                RemoveNodeEntry entry = context.getLog().appendEntryForRemoveNode(role.getTerm(), nodeEndpoints, nodeId);
+                context.getGroup().removeNode(nodeId);
+                currentGroupConfigChangeTask.setGroupConfigEntry(entry);
+                NodeImpl.this.doReplicateLog();
+            });
+        }
+
+
+        @Override
+        public void done() {
+            synchronized (NodeImpl.this) {
+                currentGroupConfigChangeTask = GroupConfigChangeTask.NONE;
+                currentGroupConfigChangeTaskReference = new FixedResultGroupConfigTaskReference(GroupConfigChangeTaskResult.OK);
+            }
+        }
+
+    }
 
 }

@@ -2,6 +2,7 @@ package com.yl.raft.core.node;
 
 import com.yl.raft.core.log.statemachine.StateMachine;
 import com.yl.raft.core.node.role.RoleNameAndLeaderId;
+import com.yl.raft.core.node.task.GroupConfigChangeTaskReference;
 
 import javax.annotation.Nonnull;
 
@@ -34,5 +35,17 @@ public interface Node {
      * 获取当前节点信息和 leader 信息
      */
     RoleNameAndLeaderId getRoleNameAndLeaderId();
+
+    /**
+     * 添加节点
+     */
+    @Nonnull
+    GroupConfigChangeTaskReference addNode(@Nonnull NodeEndpoint endpoint);
+
+    /**
+     * 移除节点
+     */
+    @Nonnull
+    GroupConfigChangeTaskReference removeNode(@Nonnull NodeId id);
 
 }
